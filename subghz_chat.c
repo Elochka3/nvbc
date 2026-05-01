@@ -54,11 +54,10 @@ static void send_message(ChatApp* app) {
     furi_hal_subghz_idle();
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     
-    // Используем универсальный метод загрузки пресета
-    furi_hal_subghz_load_preset(FuriHalSubGhzPresetOok270Async);
-    
-    // Передаем пакет
-    furi_hal_subghz_transmit((uint8_t*)&pkt, sizeof(ChatPacket));
+    // Передаем напрямую через HAL
+    furi_hal_subghz_start_async_tx((uint8_t*)&pkt, sizeof(ChatPacket));
+    furi_delay_ms(100);
+    furi_hal_subghz_stop_async_tx();
     
     furi_hal_subghz_rx();
 }
@@ -77,12 +76,8 @@ static bool input_callback(InputEvent* event, void* ctx) {
             return true;
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             app->is_external = !app->is_external;
-            // Переключаем на внешнюю антенну через регистры
-            if(app->is_external) {
-                furi_hal_subghz_set_path(FuriHalSubGhzPathIsolate);
-            } else {
-                furi_hal_subghz_set_path(FuriHalSubGhzPathMain);
-            }
+            // Используем базовые пути антенн
+            furi_hal_subghz_set_path(app->is_external ? FuriHalSubGhzPathIsolate : FuriHalSubGhzPathOCP);
             return true;
         }
     }
@@ -117,7 +112,6 @@ int32_t subghz_chat_app(void* p) {
     view_dispatcher_run(app->view_dispatcher);
 
     furi_hal_subghz_sleep();
-    furi_hal_subghz_shutdown();
     view_dispatcher_remove_view(app->view_dispatcher, 0);
     view_dispatcher_remove_view(app->view_dispatcher, 1);
     text_input_free(app->text_input);
