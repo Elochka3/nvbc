@@ -20,6 +20,8 @@ typedef struct {
 
 static void render_callback(Canvas* canvas, void* ctx) {
     ChatApp* app = ctx;
+    if(!app) return;
+
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str(canvas, 2, 12, "Sub-GHz Messenger");
     canvas_set_font(canvas, FontSecondary);
@@ -32,24 +34,9 @@ static void render_callback(Canvas* canvas, void* ctx) {
     canvas_draw_str(canvas, 2, 62, "OK: Write | UP/DN: Ant");
 }
 
-static void send_message(ChatApp* app) {
-    UNUSED(app);
-    furi_hal_subghz_idle();
-    furi_hal_subghz_set_frequency(CHAT_FREQ);
-    
-    // Используем самый стабильный способ установки пресета
-    furi_hal_subghz_load_custom_preset(NULL); 
-    
-    furi_hal_subghz_start_async_tx(NULL, NULL);
-    furi_delay_ms(50);
-    furi_hal_subghz_stop_async_tx();
-    
-    furi_hal_subghz_rx();
-}
-
 static void text_input_done(void* ctx) {
     ChatApp* app = ctx;
-    send_message(app);
+    // Пока просто возвращаемся на главный экран без отправки, чтобы проверить стабильность
     view_dispatcher_switch_to_view(app->view_dispatcher, 0);
 }
 
@@ -61,12 +48,16 @@ static bool input_callback(InputEvent* event, void* ctx) {
             return true;
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             app->is_external = !app->is_external;
-            // Обходим ошибку путей, используя базовый вызов
-            furi_hal_subghz_set_path(FuriHalSubGhzPathIsolate);
             return true;
         }
     }
     return false;
+}
+
+// Коллбэк для выхода по кнопке BACK
+static uint32_t exit_callback(void* context) {
+    UNUSED(context);
+    return VIEW_NONE;
 }
 
 int32_t subghz_chat_app(void* p) {
@@ -76,9 +67,6 @@ int32_t subghz_chat_app(void* p) {
     
     app->gui = furi_record_open(RECORD_GUI);
     app->view_dispatcher = view_dispatcher_alloc();
-    
-    //furi_hal_subghz_init();
-    furi_hal_subghz_set_frequency(CHAT_FREQ);
 
     app->main_view = view_alloc();
     view_set_context(app->main_view, app);
@@ -91,15 +79,17 @@ int32_t subghz_chat_app(void* p) {
 
     view_dispatcher_add_view(app->view_dispatcher, 0, app->main_view);
     view_dispatcher_add_view(app->view_dispatcher, 1, text_input_get_view(app->text_input));
+    
+    // Добавляем обработчик кнопки назад, чтобы не было вылетов при выходе
+    view_set_previous_callback(app->main_view, exit_callback);
+    view_set_previous_callback(text_input_get_view(app->text_input), exit_callback);
+
     view_dispatcher_attach_to_gui(app->view_dispatcher, app->gui, ViewDispatcherTypeFullscreen);
     view_dispatcher_switch_to_view(app->view_dispatcher, 0);
 
-    furi_hal_subghz_rx();
     view_dispatcher_run(app->view_dispatcher);
 
-    furi_hal_subghz_idle();
-    furi_hal_subghz_sleep();
-    
+    // Правильная очистка памяти
     view_dispatcher_remove_view(app->view_dispatcher, 0);
     view_dispatcher_remove_view(app->view_dispatcher, 1);
     text_input_free(app->text_input);
