@@ -15,7 +15,6 @@ typedef struct {
     bool is_external;
 } ChatApp;
 
-// Коллбэк отрисовки главного экрана
 static void render_callback(Canvas* canvas, void* ctx) {
     ChatApp* app = ctx;
     canvas_set_font(canvas, FontPrimary);
@@ -30,15 +29,14 @@ static void render_callback(Canvas* canvas, void* ctx) {
     canvas_draw_str(canvas, 2, 62, "OK: Write | UP/DN: Ant");
 }
 
-// Навигация: что делать при нажатии кнопки "Назад"
 static uint32_t prev_callback(void* ctx) {
     UNUSED(ctx);
-    return VIEW_NONE; // Выход из приложения
+    return VIEW_NONE;
 }
 
 static uint32_t back_to_main_callback(void* ctx) {
     UNUSED(ctx);
-    return 0; // Возврат на экран с ID 0 (главный)
+    return 0;
 }
 
 static void text_input_done(void* ctx) {
@@ -54,7 +52,8 @@ static bool input_callback(InputEvent* event, void* ctx) {
             return true;
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             app->is_external = !app->is_external;
-            view_update(app->main_view); // Обновляем экран при смене антенны
+            // Правильная функция обновления экрана в Flipper SDK
+            view_commit_model(app->main_view, true);
             return true;
         }
     }
@@ -69,20 +68,17 @@ int32_t subghz_chat_app(void* p) {
     app->gui = furi_record_open(RECORD_GUI);
     app->view_dispatcher = view_dispatcher_alloc();
 
-    // Создаем главный вид
     app->main_view = view_alloc();
     view_set_context(app->main_view, app);
     view_set_draw_callback(app->main_view, render_callback);
     view_set_input_callback(app->main_view, input_callback);
     view_set_previous_callback(app->main_view, prev_callback);
 
-    // Создаем ввод текста
     app->text_input = text_input_alloc();
     text_input_set_result_callback(app->text_input, text_input_done, app, app->tx_buf, 64, true);
     text_input_set_header_text(app->text_input, "Message:");
     view_set_previous_callback(text_input_get_view(app->text_input), back_to_main_callback);
 
-    // Добавляем в диспетчер
     view_dispatcher_add_view(app->view_dispatcher, 0, app->main_view);
     view_dispatcher_add_view(app->view_dispatcher, 1, text_input_get_view(app->text_input));
     
@@ -91,7 +87,6 @@ int32_t subghz_chat_app(void* p) {
 
     view_dispatcher_run(app->view_dispatcher);
 
-    // Очистка
     view_dispatcher_remove_view(app->view_dispatcher, 0);
     view_dispatcher_remove_view(app->view_dispatcher, 1);
     text_input_free(app->text_input);
