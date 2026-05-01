@@ -23,6 +23,8 @@ typedef struct {
 
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
+    if(!m) return;
+
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str(canvas, 2, 12, "Sub-GHz Messenger");
     
@@ -36,13 +38,19 @@ static void render_callback(Canvas* canvas, void* model) {
 }
 
 static void send_radio_packet(ChatApp* app) {
-    UNUSED(app); // Исправление ошибки unused parameter
+    // Безопасная проверка: разрешена ли передача на этой частоте
+    if(!furi_hal_subghz_is_tx_allowed(CHAT_FREQ)) {
+        return; 
+    }
+
     furi_hal_subghz_idle();
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     
-    furi_hal_subghz_start_async_tx(NULL, NULL);
-    furi_delay_ms(10);
-    furi_hal_subghz_stop_async_tx();
+    // Пытаемся запустить передачу. Если система не дает - furi_check не упадет
+    if(furi_hal_subghz_start_async_tx(NULL, NULL)) {
+        furi_delay_ms(50);
+        furi_hal_subghz_stop_async_tx();
+    }
     
     furi_hal_subghz_rx();
 }
