@@ -1,0 +1,10 @@
+name: "Build FAP"
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build with uFBT
+        uses: flipperdevices/flipperzero-ufbt-action@v0.1
