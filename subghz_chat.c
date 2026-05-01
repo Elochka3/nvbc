@@ -6,9 +6,6 @@
 #include <furi_hal_subghz.h>
 #include <string.h>
 
-// Подключаем заголовок для проверки разрешений передачи
-#include <harden/harden.h>
-
 #define CHAT_FREQ 433920000 
 
 typedef struct {
@@ -41,15 +38,16 @@ static void render_callback(Canvas* canvas, void* model) {
 }
 
 static void send_radio_packet(ChatApp* app) {
-    UNUSED(app);
-    
-    // В некоторых SDK функция проверки называется furi_hal_subghz_is_tx_allowed
-    // Но если она не находится, мы просто инициализируем радио безопасно.
+    // Чтобы не было краша, используем официальную последовательность HAL
     furi_hal_subghz_idle();
-    furi_hal_subghz_set_frequency(CHAT_FREQ);
     
-    // Безопасный запуск передачи через HAL
-    if(furi_hal_subghz_start_async_tx(NULL, NULL)) {
+    // Проверяем возможность передачи перед установкой частоты
+    if(furi_hal_subghz_is_tx_allowed(CHAT_FREQ)) {
+        furi_hal_subghz_set_frequency(CHAT_FREQ);
+        furi_hal_subghz_load_preset(FuriHalSubGhzPresetOok270Async);
+        
+        // Передача пустого пакета для проверки стабильности
+        furi_hal_subghz_start_async_tx(NULL, NULL);
         furi_delay_ms(50);
         furi_hal_subghz_stop_async_tx();
     }
@@ -82,7 +80,8 @@ static bool input_callback(InputEvent* event, void* ctx) {
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             with_view_model(app->main_view, ChatModel * m, {
                 m->is_external = !m->is_external;
-                furi_hal_subghz_set_path(FuriHalSubGhzPathIsolate);
+                // Используем универсальную команду смены пути
+                furi_hal_subghz_set_path(m->is_external ? FuriHalSubGhzPathIsolate : FuriHalSubGhzPathMain);
             }, true);
             return true;
         }
@@ -113,6 +112,7 @@ int32_t subghz_chat_app(void* p) {
     view_dispatcher_add_view(app->view_dispatcher, 0, app->main_view);
     view_dispatcher_add_view(app->view_dispatcher, 1, text_input_get_view(app->text_input));
     
+    // Инициализация радио без прямого вызова init()
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     furi_hal_subghz_rx();
 
