@@ -3,10 +3,7 @@
 #include <gui/gui.h>
 #include <gui/view_dispatcher.h>
 #include <gui/modules/text_input.h>
-#include <furi_hal_subghz.h>
 #include <string.h>
-
-#define CHAT_FREQ 433920000 
 
 typedef struct {
     Gui* gui;
@@ -18,14 +15,13 @@ typedef struct {
     bool is_external;
 } ChatApp;
 
+// Коллбэк отрисовки главного экрана
 static void render_callback(Canvas* canvas, void* ctx) {
     ChatApp* app = ctx;
-    if(!app) return;
-
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str(canvas, 2, 12, "Sub-GHz Messenger");
-    canvas_set_font(canvas, FontSecondary);
     
+    canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 2, 25, app->is_external ? "Ant: EXTERNAL" : "Ant: INTERNAL");
     canvas_draw_line(canvas, 0, 28, 128, 28);
     
@@ -34,9 +30,19 @@ static void render_callback(Canvas* canvas, void* ctx) {
     canvas_draw_str(canvas, 2, 62, "OK: Write | UP/DN: Ant");
 }
 
+// Навигация: что делать при нажатии кнопки "Назад"
+static uint32_t prev_callback(void* ctx) {
+    UNUSED(ctx);
+    return VIEW_NONE; // Выход из приложения
+}
+
+static uint32_t back_to_main_callback(void* ctx) {
+    UNUSED(ctx);
+    return 0; // Возврат на экран с ID 0 (главный)
+}
+
 static void text_input_done(void* ctx) {
     ChatApp* app = ctx;
-    // Пока просто возвращаемся на главный экран без отправки, чтобы проверить стабильность
     view_dispatcher_switch_to_view(app->view_dispatcher, 0);
 }
 
@@ -48,16 +54,11 @@ static bool input_callback(InputEvent* event, void* ctx) {
             return true;
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             app->is_external = !app->is_external;
+            view_update(app->main_view); // Обновляем экран при смене антенны
             return true;
         }
     }
     return false;
-}
-
-// Коллбэк для выхода по кнопке BACK
-static uint32_t exit_callback(void* context) {
-    UNUSED(context);
-    return VIEW_NONE;
 }
 
 int32_t subghz_chat_app(void* p) {
@@ -68,28 +69,29 @@ int32_t subghz_chat_app(void* p) {
     app->gui = furi_record_open(RECORD_GUI);
     app->view_dispatcher = view_dispatcher_alloc();
 
+    // Создаем главный вид
     app->main_view = view_alloc();
     view_set_context(app->main_view, app);
     view_set_draw_callback(app->main_view, render_callback);
     view_set_input_callback(app->main_view, input_callback);
+    view_set_previous_callback(app->main_view, prev_callback);
 
+    // Создаем ввод текста
     app->text_input = text_input_alloc();
     text_input_set_result_callback(app->text_input, text_input_done, app, app->tx_buf, 64, true);
     text_input_set_header_text(app->text_input, "Message:");
+    view_set_previous_callback(text_input_get_view(app->text_input), back_to_main_callback);
 
+    // Добавляем в диспетчер
     view_dispatcher_add_view(app->view_dispatcher, 0, app->main_view);
     view_dispatcher_add_view(app->view_dispatcher, 1, text_input_get_view(app->text_input));
     
-    // Добавляем обработчик кнопки назад, чтобы не было вылетов при выходе
-    view_set_previous_callback(app->main_view, exit_callback);
-    view_set_previous_callback(text_input_get_view(app->text_input), exit_callback);
-
     view_dispatcher_attach_to_gui(app->view_dispatcher, app->gui, ViewDispatcherTypeFullscreen);
     view_dispatcher_switch_to_view(app->view_dispatcher, 0);
 
     view_dispatcher_run(app->view_dispatcher);
 
-    // Правильная очистка памяти
+    // Очистка
     view_dispatcher_remove_view(app->view_dispatcher, 0);
     view_dispatcher_remove_view(app->view_dispatcher, 1);
     text_input_free(app->text_input);
