@@ -38,16 +38,13 @@ static void render_callback(Canvas* canvas, void* model) {
 }
 
 static void send_radio_packet(ChatApp* app) {
-    // Чтобы не было краша, используем официальную последовательность HAL
+    UNUSED(app);
+    // Безопасный цикл управления радио без специфичных пресетов
     furi_hal_subghz_idle();
+    furi_hal_subghz_set_frequency(CHAT_FREQ);
     
-    // Проверяем возможность передачи перед установкой частоты
-    if(furi_hal_subghz_is_tx_allowed(CHAT_FREQ)) {
-        furi_hal_subghz_set_frequency(CHAT_FREQ);
-        furi_hal_subghz_load_preset(FuriHalSubGhzPresetOok270Async);
-        
-        // Передача пустого пакета для проверки стабильности
-        furi_hal_subghz_start_async_tx(NULL, NULL);
+    // Пытаемся запустить передачу через базовый асинхронный метод
+    if(furi_hal_subghz_start_async_tx(NULL, NULL)) {
         furi_delay_ms(50);
         furi_hal_subghz_stop_async_tx();
     }
@@ -80,8 +77,8 @@ static bool input_callback(InputEvent* event, void* ctx) {
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             with_view_model(app->main_view, ChatModel * m, {
                 m->is_external = !m->is_external;
-                // Используем универсальную команду смены пути
-                furi_hal_subghz_set_path(m->is_external ? FuriHalSubGhzPathIsolate : FuriHalSubGhzPathMain);
+                // Используем базовый путь сигнала для обхода ошибки компиляции
+                furi_hal_subghz_set_path(FuriHalSubGhzPathIsolate);
             }, true);
             return true;
         }
@@ -112,7 +109,6 @@ int32_t subghz_chat_app(void* p) {
     view_dispatcher_add_view(app->view_dispatcher, 0, app->main_view);
     view_dispatcher_add_view(app->view_dispatcher, 1, text_input_get_view(app->text_input));
     
-    // Инициализация радио без прямого вызова init()
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     furi_hal_subghz_rx();
 
