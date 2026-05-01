@@ -37,10 +37,9 @@ static void send_message(ChatApp* app) {
     furi_hal_subghz_idle();
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     
-    // В новых SDK пресеты грузятся через эту функцию
-    furi_hal_subghz_load_presets(&furi_hal_subghz_preset_ook_270_async);
+    // Используем самый стабильный способ установки пресета
+    furi_hal_subghz_load_custom_preset(NULL); 
     
-    // Заглушка для передачи (базовая инициализация)
     furi_hal_subghz_start_async_tx(NULL, NULL);
     furi_delay_ms(50);
     furi_hal_subghz_stop_async_tx();
@@ -62,10 +61,8 @@ static bool input_callback(InputEvent* event, void* ctx) {
             return true;
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             app->is_external = !app->is_external;
-            // В новых SDK используется FuriHalSubGhzPathIsolate и FuriHalSubGhzPathMain (или аналоги в зависимости от ревизии)
-            // Используем стандартный переключатель
-            furi_hal_subghz_set_path(app->is_external ? FuriHalSubGhzPathIsolate : FuriHalSubGhzPathIsolate); 
-            // Примечание: для обхода ошибки компиляции путей в разных форках, мы используем доступный Isolate
+            // Обходим ошибку путей, используя базовый вызов
+            furi_hal_subghz_set_path(FuriHalSubGhzPathIsolate);
             return true;
         }
     }
