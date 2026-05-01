@@ -77,7 +77,7 @@ int32_t subghz_chat_app(void* p) {
     app->gui = furi_record_open(RECORD_GUI);
     app->view_dispatcher = view_dispatcher_alloc();
     
-    furi_hal_subghz_init();
+    //furi_hal_subghz_init();
     furi_hal_subghz_set_frequency(CHAT_FREQ);
 
     app->main_view = view_alloc();
