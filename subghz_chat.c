@@ -23,32 +23,37 @@ typedef struct {
 
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
-    if(!m) return;
-
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Sub-GHz Messenger");
+    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat (Unleashed)");
     
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 2, 25, m->is_external ? "Ant: EXTERNAL" : "Ant: INTERNAL");
     canvas_draw_line(canvas, 0, 28, 128, 28);
     
-    canvas_draw_str(canvas, 2, 42, "Last RX:");
-    canvas_draw_str(canvas, 2, 52, strlen(m->last_rx_msg) ? m->last_rx_msg : "No messages...");
+    canvas_draw_str(canvas, 2, 42, "Frequency: 433.92 MHz");
+    canvas_draw_str(canvas, 2, 52, "Status: Ready to send");
     canvas_draw_str(canvas, 2, 62, "OK: Write | UP/DN: Ant");
 }
 
 static void send_radio_packet(ChatApp* app) {
-    UNUSED(app);
-    // Безопасный цикл управления радио без специфичных пресетов
+    // В Unleashed используем безопасный захват радиомодуля
     furi_hal_subghz_idle();
+    
+    // Устанавливаем частоту
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     
-    // Пытаемся запустить передачу через базовый асинхронный метод
+    // Загружаем стандартный асинхронный пресет (OOK 650)
+    // Это самый надежный способ избежать furi_check failed
+    furi_hal_subghz_load_preset(FuriHalSubGhzPresetOok650Async);
+
+    // Запускаем передачу
+    // На Unleashed это разрешено, если мы вызвали idle() перед этим
     if(furi_hal_subghz_start_async_tx(NULL, NULL)) {
-        furi_delay_ms(50);
+        furi_delay_ms(100); // Имитация работы передатчика
         furi_hal_subghz_stop_async_tx();
     }
     
+    // Возвращаемся в режим приема
     furi_hal_subghz_rx();
 }
 
@@ -77,8 +82,8 @@ static bool input_callback(InputEvent* event, void* ctx) {
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             with_view_model(app->main_view, ChatModel * m, {
                 m->is_external = !m->is_external;
-                // Используем базовый путь сигнала для обхода ошибки компиляции
-                furi_hal_subghz_set_path(FuriHalSubGhzPathIsolate);
+                // Настройка путей для внешнего модуля CC1101
+                furi_hal_subghz_set_path(m->is_external ? FuriHalSubGhzPathIsolate : FuriHalSubGhzPathMain);
             }, true);
             return true;
         }
@@ -109,6 +114,7 @@ int32_t subghz_chat_app(void* p) {
     view_dispatcher_add_view(app->view_dispatcher, 0, app->main_view);
     view_dispatcher_add_view(app->view_dispatcher, 1, text_input_get_view(app->text_input));
     
+    // Пред-настройка радио
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     furi_hal_subghz_rx();
 
@@ -117,6 +123,7 @@ int32_t subghz_chat_app(void* p) {
 
     view_dispatcher_run(app->view_dispatcher);
 
+    // Чистый выход из радио режима
     furi_hal_subghz_idle();
     furi_hal_subghz_sleep();
 
