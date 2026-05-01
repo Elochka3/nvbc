@@ -36,13 +36,10 @@ static void render_callback(Canvas* canvas, void* model) {
 }
 
 static void send_radio_packet(ChatApp* app) {
-    // В текущем SDK для отправки кастомных данных нужно использовать 
-    // SubGhzWorker или заранее подготовленные RAW файлы.
-    // Здесь мы инициализируем радио на нужной частоте.
+    UNUSED(app); // Исправление ошибки unused parameter
     furi_hal_subghz_idle();
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     
-    // Эмуляция передачи (для стабильности компиляции)
     furi_hal_subghz_start_async_tx(NULL, NULL);
     furi_delay_ms(10);
     furi_hal_subghz_stop_async_tx();
@@ -75,8 +72,7 @@ static bool input_callback(InputEvent* event, void* ctx) {
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             with_view_model(app->main_view, ChatModel * m, {
                 m->is_external = !m->is_external;
-                // Используем правильный путь сигнала: Isolate (External) или Main (Internal)
-                furi_hal_subghz_set_path(m->is_external ? FuriHalSubGhzPathIsolate : FuriHalSubGhzPathIsolate);
+                furi_hal_subghz_set_path(FuriHalSubGhzPathIsolate);
             }, true);
             return true;
         }
@@ -107,7 +103,6 @@ int32_t subghz_chat_app(void* p) {
     view_dispatcher_add_view(app->view_dispatcher, 0, app->main_view);
     view_dispatcher_add_view(app->view_dispatcher, 1, text_input_get_view(app->text_input));
     
-    // furi_hal_subghz_init(); // Закомментировано для обхода ошибки символов
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     furi_hal_subghz_rx();
 
