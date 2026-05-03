@@ -13,7 +13,11 @@ typedef enum {
 } ChatCustomEvent;
 
 typedef struct {
-    char last_msg[64];
+    char text[64];
+} ChatMessage;
+
+typedef struct {
+    char status_msg[64];
 } ChatModel;
 
 typedef struct {
@@ -21,63 +25,61 @@ typedef struct {
     ViewDispatcher* view_dispatcher;
     View* main_view;
     TextInput* text_input;
+    
+    FuriThread* worker_thread;
+    FuriMessageQueue* tx_queue;
+    volatile bool is_running;
+    
     char tx_buf[64];
 } ChatApp;
 
-// Коллбэк для генерации импульса
-static LevelDuration chat_tx_callback_dummy(void* context) {
+// Коллбэк данных (простейший OOK: 500мс сигнал)
+static LevelDuration chat_tx_callback(void* context) {
     UNUSED(context);
     return level_duration_make(true, 500); 
 }
 
-// Рендер интерфейса
+// ПОТОК РАДИО (Не блокирует GUI)
+static int32_t chat_worker_thread(void* context) {
+    ChatApp* app = context;
+    ChatMessage msg;
+
+    while(app->is_running) {
+        if(furi_message_queue_get(app->tx_queue, &msg, 100) == FuriStatusOk) {
+            furi_hal_subghz_idle();
+            furi_hal_subghz_set_frequency(CHAT_FREQ);
+            
+            if(furi_hal_subghz_start_async_tx(chat_tx_callback, NULL)) {
+                furi_delay_ms(150); // Теперь задержка в отдельном потоке БЕЗОПАСНА
+                furi_hal_subghz_stop_async_tx();
+            }
+            furi_hal_subghz_rx();
+        }
+    }
+    return 0;
+}
+
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v4.8.1");
-    
+    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v5.0");
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_line(canvas, 0, 14, 128, 14);
-    
-    canvas_draw_str(canvas, 2, 30, "Status:");
-    canvas_draw_str(canvas, 40, 30, m->last_msg);
-    
-    canvas_draw_line(canvas, 0, 52, 128, 52);
+    canvas_draw_str(canvas, 2, 32, "Status:");
+    canvas_draw_str(canvas, 45, 32, m->status_msg);
     canvas_draw_str(canvas, 2, 62, "OK: Write Message");
-}
-
-// БЕЗОПАСНАЯ ОТПРАВКА (v4.8.1 - Исправленная проверка)
-static void perform_send(ChatApp* app) {
-    with_view_model(app->main_view, ChatModel* m, {
-        strncpy(m->last_msg, "Sending...", 63);
-    }, true);
-
-    furi_hal_subghz_idle();
-    furi_hal_subghz_set_frequency(CHAT_FREQ);
-    
-    // Используем более простую проверку готовности
-    // В Unleashed часто достаточно просто вызвать старт, 
-    // если частота в разрешенном диапазоне
-    if(furi_hal_subghz_start_async_tx(chat_tx_callback_dummy, NULL)) {
-        furi_delay_ms(100); 
-        furi_hal_subghz_stop_async_tx();
-        
-        with_view_model(app->main_view, ChatModel* m, {
-            strncpy(m->last_msg, "Sent OK!", 63);
-        }, true);
-    } else {
-         with_view_model(app->main_view, ChatModel* m, {
-            strncpy(m->last_msg, "TX Error (Freq?)", 63);
-        }, true);
-    }
-
-    furi_hal_subghz_rx();
 }
 
 static bool chat_custom_event_callback(void* context, uint32_t event) {
     ChatApp* app = context;
     if(event == ChatEventSendPacket) {
-        perform_send(app);
+        ChatMessage msg;
+        strncpy(msg.text, app->tx_buf, 63);
+        
+        with_view_model(app->main_view, ChatModel* m, {
+            strncpy(m->status_msg, "Sent to Queue...", 63);
+        }, true);
+        
+        furi_message_queue_put(app->tx_queue, &msg, 0);
         return true;
     }
     return false;
@@ -104,12 +106,17 @@ int32_t subghz_chat_app(void* p) {
     UNUSED(p);
     ChatApp* app = malloc(sizeof(ChatApp));
     memset(app, 0, sizeof(ChatApp));
+    app->is_running = true;
 
     app->gui = furi_record_open(RECORD_GUI);
     app->view_dispatcher = view_dispatcher_alloc();
-    
     view_dispatcher_set_event_callback_context(app->view_dispatcher, app);
     view_dispatcher_set_custom_event_callback(app->view_dispatcher, chat_custom_event_callback);
+
+    // Поток и очередь (Важно: стек 2048)
+    app->tx_queue = furi_message_queue_alloc(4, sizeof(ChatMessage));
+    app->worker_thread = furi_thread_alloc_ex("SubChatWorker", 2048, chat_worker_thread, app);
+    furi_thread_start(app->worker_thread);
 
     app->main_view = view_alloc();
     view_allocate_model(app->main_view, ViewModelTypeLockFree, sizeof(ChatModel));
@@ -124,7 +131,6 @@ int32_t subghz_chat_app(void* p) {
     view_dispatcher_add_view(app->view_dispatcher, 0, app->main_view);
     view_dispatcher_add_view(app->view_dispatcher, 1, text_input_get_view(app->text_input));
     view_dispatcher_attach_to_gui(app->view_dispatcher, app->gui, ViewDispatcherTypeFullscreen);
-    
     view_dispatcher_switch_to_view(app->view_dispatcher, 0);
 
     furi_hal_subghz_idle();
@@ -132,6 +138,11 @@ int32_t subghz_chat_app(void* p) {
     furi_hal_subghz_rx();
 
     view_dispatcher_run(app->view_dispatcher);
+
+    app->is_running = false;
+    furi_thread_join(app->worker_thread);
+    furi_thread_free(app->worker_thread);
+    furi_message_queue_free(app->tx_queue);
 
     furi_hal_subghz_idle();
     view_dispatcher_remove_view(app->view_dispatcher, 0);
