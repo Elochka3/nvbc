@@ -6,11 +6,10 @@
 #include <furi_hal_subghz.h>
 #include <string.h>
 
-// Новые инклуды для работы с протоколами
+// Правильные пути к библиотекам
 #include <lib/subghz/receiver.h>
 #include <lib/subghz/transmitter.h>
 #include <lib/subghz/environment.h>
-#include <lib/subghz/protocols/princeton.h>
 
 #define CHAT_FREQ 433920000 
 
@@ -43,7 +42,7 @@ typedef struct {
     char tx_buf[64];
 } ChatApp;
 
-// Коллбэк, который срабатывает, когда пойман пакет
+// Коллбэк приема
 static void chat_receiver_callback(SubGhzReceiver* receiver, SubGhzProtocolDecoder* decoder, void* context) {
     ChatApp* app = context;
     UNUSED(receiver);
@@ -51,7 +50,6 @@ static void chat_receiver_callback(SubGhzReceiver* receiver, SubGhzProtocolDecod
     FuriString* res = furi_string_alloc();
     subghz_protocol_decoder_get_string(decoder, res);
     
-    // Копируем результат в модель для отображения
     with_view_model(app->main_view, ChatModel* m, {
         strncpy(m->last_rx_msg, furi_string_get_cstr(res), 63);
     }, true);
@@ -59,39 +57,48 @@ static void chat_receiver_callback(SubGhzReceiver* receiver, SubGhzProtocolDecod
     furi_string_free(res);
 }
 
-// Поток воркера: теперь он и шлет, и слушает
+// ИСПРАВЛЕННЫЙ ВОРКЕР (без прямых ссылок на заголовки протоколов)
 static int32_t chat_worker_thread(void* context) {
     ChatApp* app = context;
     ChatMessage msg;
 
     while(app->is_running) {
-        // 1. ПРОВЕРКА ОТПРАВКИ
+        // Чтение очереди на отправку
         if(furi_message_queue_get(app->tx_queue, &msg, 10) == FuriStatusOk) {
             furi_hal_subghz_idle();
             
-            // Используем стандартный передатчик Princeton
+            // Динамический поиск протокола "Princeton"
             SubGhzTransmitter* transmitter = subghz_transmitter_alloc_init(app->env, "Princeton");
-            // Кодируем наше сообщение в 24-битный код (упрощенно для Princeton)
-            uint32_t code = 0;
-            for(int i=0; i<3 && i<(int)strlen(msg.text); i++) code |= (msg.text[i] << (i*8));
             
-            subghz_protocol_encoder_princeton_get_upload(transmitter, code);
-            
-            furi_hal_subghz_set_frequency(CHAT_FREQ);
-            furi_hal_subghz_start_async_tx(subghz_transmitter_yield, transmitter);
-            
-            // Ждем завершения
-            while(!subghz_transmitter_is_dirty(transmitter) && app->is_running) {
-                furi_delay_ms(10);
+            if(transmitter) {
+                // Кодируем первые буквы сообщения в Hex для десериализации
+                uint32_t code = 0;
+                size_t len = strlen(msg.text);
+                if(len > 0) code |= ((uint8_t)msg.text[0] << 16);
+                if(len > 1) code |= ((uint8_t)msg.text[1] << 8);
+                if(len > 2) code |= (uint8_t)msg.text[2];
+
+                FuriString* data_str = furi_string_alloc_printf("%06lX", (unsigned long)code);
+                subghz_transmitter_deserialize_data(transmitter, furi_string_get_cstr(data_str));
+                furi_string_free(data_str);
+
+                furi_hal_subghz_set_frequency(CHAT_FREQ);
+                furi_hal_subghz_start_async_tx(subghz_transmitter_yield, transmitter);
+                
+                // Ожидание физической отправки
+                uint32_t timeout = 0;
+                while(!subghz_transmitter_is_dirty(transmitter) && timeout < 100) {
+                    furi_delay_ms(10);
+                    timeout++;
+                }
+                
+                furi_hal_subghz_stop_async_tx();
+                subghz_transmitter_free(transmitter);
             }
-            
-            furi_hal_subghz_stop_async_tx();
-            subghz_transmitter_free(transmitter);
             furi_hal_subghz_rx();
         }
 
-        // 2. ПРОВЕРКА ПРИЕМА (подаем данные в декодер)
-        // В упрощенном виде для SDK:
+        // Прием данных
         if(furi_hal_subghz_is_rx_data_ready()) {
             bool level = furi_hal_subghz_get_rx_level();
             uint32_t duration = furi_hal_subghz_get_rx_duration();
@@ -163,7 +170,6 @@ int32_t subghz_chat_app(void* p) {
     app->gui = furi_record_open(RECORD_GUI);
     app->view_dispatcher = view_dispatcher_alloc();
     
-    // Инициализация радио-окружения
     app->env = subghz_environment_alloc();
     subghz_environment_load_all_protocols(app->env);
     app->receiver = subghz_receiver_alloc_init(app->env);
