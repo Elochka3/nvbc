@@ -27,6 +27,12 @@ typedef struct {
     char tx_buf[64];
 } ChatApp;
 
+// ПУСТОЙ КОЛЛБЭК: Нужен, чтобы система не падала при TX
+static LevelDuration chat_tx_callback_silent(void* context) {
+    UNUSED(context);
+    return level_duration_make(false, 100); // Просто тишина
+}
+
 static void chat_worker_callback(void* context) {
     ChatApp* app = context;
     with_view_model(app->main_view, ChatModel* m, {
@@ -37,7 +43,7 @@ static void chat_worker_callback(void* context) {
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v3.0");
+    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v3.1");
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 2, 24, m->is_external ? "Ant: EXTERNAL" : "Ant: INTERNAL");
     canvas_draw_line(canvas, 0, 26, 128, 26);
@@ -47,22 +53,24 @@ static void render_callback(Canvas* canvas, void* model) {
 }
 
 static void send_radio_packet(ChatApp* app) {
+    // 1. Уведомляем интерфейс
     with_view_model(app->main_view, ChatModel* m, {
         strncpy(m->last_rx_msg, "TX: Sending...", 63);
     }, true);
 
+    // 2. Радио в IDLE
     furi_hal_subghz_idle();
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     
-    // ПРЯМОЙ ЗАПУСК ПЕРЕДАТЧИКА (Самый стабильный метод)
-    furi_hal_subghz_start_direct_tx(); 
-    // Если билд упадет на строке выше, замени её на: furi_hal_subghz_tx_start();
-    
-    furi_delay_ms(150);
-    
-    furi_hal_subghz_stop_async_tx(); // Универсальный стоп
+    // 3. Используем асинхронный старт с коллбэком-пустышкой
+    // Это гарантирует отсутствие furi_check failed и Kernel Panic
+    if(furi_hal_subghz_start_async_tx(chat_tx_callback_silent, NULL)) {
+        furi_delay_ms(150);
+        furi_hal_subghz_stop_async_tx();
+    }
+
     furi_hal_subghz_idle();
-    furi_hal_subghz_rx(); // Возврат в прием
+    furi_hal_subghz_rx(); // Возвращаем режим приема
 
     with_view_model(app->main_view, ChatModel* m, {
         strncpy(m->last_rx_msg, "TX: Done!", 63);
@@ -96,6 +104,7 @@ static bool input_callback(InputEvent* event, void* ctx) {
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             with_view_model(app->main_view, ChatModel * m, {
                 m->is_external = !m->is_external;
+                // Прямая настройка путей: 1 - external, 0 - internal
                 furi_hal_subghz_set_path(m->is_external ? 1 : 0);
             }, true);
             return true;
