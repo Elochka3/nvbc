@@ -27,6 +27,13 @@ typedef struct {
     char tx_buf[64];
 } ChatApp;
 
+// ЭТА ФУНКЦИЯ СПАСЕТ ОТ КРАША: 
+// Она просто говорит передатчику держать сигнал 500 микросекунд
+static LevelDuration chat_tx_callback_dummy(void* context) {
+    UNUSED(context);
+    return level_duration_make(true, 500);
+}
+
 static void chat_worker_callback(void* context) {
     ChatApp* app = context;
     with_view_model(app->main_view, ChatModel* m, {
@@ -37,7 +44,7 @@ static void chat_worker_callback(void* context) {
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v3.5");
+    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v3.6");
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 2, 24, m->is_external ? "Ant: EXTERNAL" : "Ant: INTERNAL");
     canvas_draw_line(canvas, 0, 26, 128, 26);
@@ -47,28 +54,28 @@ static void render_callback(Canvas* canvas, void* model) {
 }
 
 static void send_radio_packet(ChatApp* app) {
-    // 1. Уходим в IDLE для настройки
+    // Временно останавливаем воркер, чтобы не мешал
+    if(subghz_worker_is_running(app->worker)) subghz_worker_stop(app->worker);
+
     furi_hal_subghz_idle();
-    furi_delay_ms(10);
-    
-    // 2. Устанавливаем частоту
+    furi_delay_ms(50);
     furi_hal_subghz_set_frequency(CHAT_FREQ);
+    
+    // Загружаем пресет (нужен для инициализации регистров чипа)
+    furi_hal_subghz_load_preset(FuriHalSubGhzPresetOok650Async);
 
-    // 3. Используем базовую функцию старта TX, которая есть везде
-    // Если и она выдаст ошибку - значит SDK очень сильно изменен
-    furi_hal_subghz_start_async_tx(NULL, NULL); 
-    
-    furi_delay_ms(150); 
-    
-    furi_hal_subghz_stop_async_tx(); 
+    // ТЕПЕРЬ ПЕРЕДАЕМ РЕАЛЬНУЮ ФУНКЦИЮ ВМЕСТО NULL
+    if(furi_hal_subghz_start_async_tx(chat_tx_callback_dummy, NULL)) {
+        furi_delay_ms(150); 
+        furi_hal_subghz_stop_async_tx();
+        
+        with_view_model(app->main_view, ChatModel* m, {
+            strncpy(m->last_rx_msg, "TX: Pulse OK", 63);
+        }, true);
+    }
+
     furi_hal_subghz_idle();
-    
-    // Возврат в прием
-    furi_hal_subghz_rx(); 
-
-    with_view_model(app->main_view, ChatModel* m, {
-        strncpy(m->last_rx_msg, "TX: OK!", 63);
-    }, true);
+    subghz_worker_start(app->worker); 
 }
 
 static bool chat_custom_event_callback(void* context, uint32_t event) {
