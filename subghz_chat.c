@@ -27,13 +27,13 @@ typedef struct {
     char tx_buf[64];
 } ChatApp;
 
-// Коллбэк-заглушка для передачи, чтобы избежать furi_check failed
+// Коллбэк для генерации импульса
 static LevelDuration chat_tx_callback_dummy(void* context) {
     UNUSED(context);
-    // Генерируем сигнал (500мкс - HIGH, 500мкс - LOW)
     return level_duration_make(true, 500);
 }
 
+// Легкий прием
 static void chat_worker_callback(void* context) {
     ChatApp* app = context;
     with_view_model(app->main_view, ChatModel* m, {
@@ -44,7 +44,7 @@ static void chat_worker_callback(void* context) {
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v3.7");
+    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v3.8");
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 2, 24, m->is_external ? "Ant: EXTERNAL" : "Ant: INTERNAL");
     canvas_draw_line(canvas, 0, 26, 128, 26);
@@ -53,28 +53,31 @@ static void render_callback(Canvas* canvas, void* model) {
     canvas_draw_str(canvas, 2, 62, "OK: Write | UP/DN: Ant");
 }
 
+// ФИНАЛЬНАЯ ЛОГИКА БЕЗ БЛОКИРОВОК
 static void send_radio_packet(ChatApp* app) {
-    // Останавливаем воркер перед TX
-    if(subghz_worker_is_running(app->worker)) subghz_worker_stop(app->worker);
-
+    // ВАЖНО: Мы ВООБЩЕ не вызываем subghz_worker_stop
+    
+    // 1. Силой переводим чип в IDLE (быстро и безопасно)
     furi_hal_subghz_idle();
-    furi_delay_ms(50);
+    furi_delay_ms(10);
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     
-    // Вместо load_preset используем базовую инициализацию асинхронного TX
-    // Если система спросит "кто разрешил?", start_async_tx сама проверит права
+    // 2. Вклиниваемся в эфир. Если заблокировано - просто идем дальше
     if(furi_hal_subghz_start_async_tx(chat_tx_callback_dummy, NULL)) {
-        furi_delay_ms(200); 
+        furi_delay_ms(150); 
         furi_hal_subghz_stop_async_tx();
         
         with_view_model(app->main_view, ChatModel* m, {
-            strncpy(m->last_rx_msg, "TX: Pulse OK", 63);
+            strncpy(m->last_rx_msg, "TX: Pulse OK!", 63);
+        }, true);
+    } else {
+         with_view_model(app->main_view, ChatModel* m, {
+            strncpy(m->last_rx_msg, "TX: Busy/Lock", 63);
         }, true);
     }
 
-    furi_hal_subghz_idle();
-    furi_delay_ms(50);
-    subghz_worker_start(app->worker); 
+    // 3. Возвращаем чип в режим приема (воркер подхватит его)
+    furi_hal_subghz_rx(); 
 }
 
 static bool chat_custom_event_callback(void* context, uint32_t event) {
@@ -104,7 +107,6 @@ static bool input_callback(InputEvent* event, void* ctx) {
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             with_view_model(app->main_view, ChatModel * m, {
                 m->is_external = !m->is_external;
-                // Настройка антенн для Unleashed (1 - ext, 0 - int)
                 furi_hal_subghz_set_path(m->is_external ? 1 : 0);
             }, true);
             return true;
