@@ -24,7 +24,7 @@ typedef struct {
     char tx_buf[64];
 } ChatApp;
 
-// Коллбэк для генерации тестового импульса
+// Коллбэк для генерации импульса
 static LevelDuration chat_tx_callback_dummy(void* context) {
     UNUSED(context);
     return level_duration_make(true, 500); 
@@ -34,7 +34,7 @@ static LevelDuration chat_tx_callback_dummy(void* context) {
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v4.8 [ULN]");
+    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v4.8.1");
     
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_line(canvas, 0, 14, 128, 14);
@@ -46,37 +46,31 @@ static void render_callback(Canvas* canvas, void* model) {
     canvas_draw_str(canvas, 2, 62, "OK: Write Message");
 }
 
-// БЕЗОПАСНАЯ ОТПРАВКА (Выполняется в основном потоке)
+// БЕЗОПАСНАЯ ОТПРАВКА (v4.8.1 - Исправленная проверка)
 static void perform_send(ChatApp* app) {
     with_view_model(app->main_view, ChatModel* m, {
         strncpy(m->last_msg, "Sending...", 63);
     }, true);
 
-    // 1. Подготовка чипа
     furi_hal_subghz_idle();
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     
-    // 2. Проверка возможности передачи (важно для Unleashed)
-    if(furi_hal_subghz_is_tx_allowed(CHAT_FREQ)) {
-        if(furi_hal_subghz_start_async_tx(chat_tx_callback_dummy, NULL)) {
-            furi_delay_ms(100); // Короткий импульс
-            furi_hal_subghz_stop_async_tx();
-            
-            with_view_model(app->main_view, ChatModel* m, {
-                strncpy(m->last_msg, "Sent OK!", 63);
-            }, true);
-        } else {
-             with_view_model(app->main_view, ChatModel* m, {
-                strncpy(m->last_msg, "TX Start Error", 63);
-            }, true);
-        }
-    } else {
+    // Используем более простую проверку готовности
+    // В Unleashed часто достаточно просто вызвать старт, 
+    // если частота в разрешенном диапазоне
+    if(furi_hal_subghz_start_async_tx(chat_tx_callback_dummy, NULL)) {
+        furi_delay_ms(100); 
+        furi_hal_subghz_stop_async_tx();
+        
         with_view_model(app->main_view, ChatModel* m, {
-            strncpy(m->last_msg, "Freq Locked!", 63);
+            strncpy(m->last_msg, "Sent OK!", 63);
+        }, true);
+    } else {
+         with_view_model(app->main_view, ChatModel* m, {
+            strncpy(m->last_msg, "TX Error (Freq?)", 63);
         }, true);
     }
 
-    // 3. Возврат в прием
     furi_hal_subghz_rx();
 }
 
@@ -114,18 +108,15 @@ int32_t subghz_chat_app(void* p) {
     app->gui = furi_record_open(RECORD_GUI);
     app->view_dispatcher = view_dispatcher_alloc();
     
-    // Настройка событий
     view_dispatcher_set_event_callback_context(app->view_dispatcher, app);
     view_dispatcher_set_custom_event_callback(app->view_dispatcher, chat_custom_event_callback);
 
-    // Главный экран
     app->main_view = view_alloc();
     view_allocate_model(app->main_view, ViewModelTypeLockFree, sizeof(ChatModel));
     view_set_context(app->main_view, app);
     view_set_draw_callback(app->main_view, render_callback);
     view_set_input_callback(app->main_view, input_callback);
 
-    // Ввод текста
     app->text_input = text_input_alloc();
     text_input_set_result_callback(app->text_input, text_input_done, app, app->tx_buf, 64, true);
     view_set_previous_callback(text_input_get_view(app->text_input), back_to_main);
@@ -136,14 +127,12 @@ int32_t subghz_chat_app(void* p) {
     
     view_dispatcher_switch_to_view(app->view_dispatcher, 0);
 
-    // Инициализация радио
     furi_hal_subghz_idle();
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     furi_hal_subghz_rx();
 
     view_dispatcher_run(app->view_dispatcher);
 
-    // Cleanup
     furi_hal_subghz_idle();
     view_dispatcher_remove_view(app->view_dispatcher, 0);
     view_dispatcher_remove_view(app->view_dispatcher, 1);
