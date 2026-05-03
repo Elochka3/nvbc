@@ -3,7 +3,7 @@ App(
     name="Sub-GHz Chat",
     apptype=FlipperAppType.EXTERNAL,
     entry_point="subghz_chat_app",
-    stack_size=2 * 1024,
+    stack_size=4 * 1024,
     fap_category="Sub-GHz",
     # КРИТИЧНО: подключаем библиотеки радио и GUI
     fap_libs=["subghz"],
