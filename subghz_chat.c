@@ -11,15 +11,14 @@
 typedef enum {
     ChatStateIdle,
     ChatStateSending,
-    ChatStateReceiving,
 } ChatState;
 
 typedef struct {
-    char text[64];
+    char text[64]; // ИСПРАВЛЕНО: Массив, а не символ
 } ChatMessage;
 
 typedef struct {
-    char last_msg[64];
+    char last_msg[64]; // ИСПРАВЛЕНО
     ChatState state;
 } ChatModel;
 
@@ -28,49 +27,40 @@ typedef struct {
     ViewDispatcher* view_dispatcher;
     View* main_view;
     TextInput* text_input;
-    
     FuriThread* worker_thread;
     FuriMessageQueue* tx_queue;
     volatile bool is_running;
-    
-    ChatState current_state;
+    volatile ChatState current_state;
     char tx_buf[64];
 } ChatApp;
 
-// Коллбэк для генерации "шума" (здесь потом будет кодировщик текста)
 static LevelDuration chat_tx_callback_payload(void* context) {
     UNUSED(context);
     return level_duration_make(true, 500); 
 }
 
-// ПОТОК РАДИО (Полная копия логики Flipper Share)
 static int32_t chat_worker_thread(void* context) {
     ChatApp* app = context;
     ChatMessage msg;
 
     while(app->is_running) {
-        // Проверяем очередь БЕЗ долгого ожидания
-        if(furi_message_queue_get(app->tx_queue, &msg, 10) == FuriStatusOk) {
+        if(furi_message_queue_get(app->tx_queue, &msg, 100) == FuriStatusOk) {
             app->current_state = ChatStateSending;
             
             furi_hal_subghz_idle();
+            furi_delay_ms(50); // Даем чипу остыть
             furi_hal_subghz_set_frequency(CHAT_FREQ);
             
-            // Сама отправка
             if(furi_hal_subghz_start_async_tx(chat_tx_callback_payload, NULL)) {
-                // Вместо одного длинного furi_delay, делаем маленькие шаги,
-                // чтобы поток мог корректно завершиться
-                for(int i = 0; i < 15; i++) {
-                    furi_delay_ms(10);
-                    if(!app->is_running) break;
-                }
+                furi_delay_ms(200); 
                 furi_hal_subghz_stop_async_tx();
             }
             
+            furi_hal_subghz_idle();
+            furi_delay_ms(50);
             furi_hal_subghz_rx();
             app->current_state = ChatStateIdle;
         }
-        furi_delay_ms(10);
     }
     return 0;
 }
@@ -78,33 +68,30 @@ static int32_t chat_worker_thread(void* context) {
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v6.0");
+    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v6.1");
     
     canvas_set_font(canvas, FontSecondary);
     if(m->state == ChatStateSending) {
-        canvas_draw_str(canvas, 2, 32, "> SENDING DATA...");
-        // Тут можно нарисовать бегущую полоску (анимацию)
-        canvas_draw_frame(canvas, 2, 40, (furi_get_tick() % 120), 4);
+        canvas_draw_str(canvas, 2, 32, "STATUS: SENDING...");
+        // Анимация прогресс-бара
+        canvas_draw_box(canvas, 2, 40, (furi_get_tick() % 120), 4);
     } else {
-        canvas_draw_str(canvas, 2, 32, "Status: Ready");
-        canvas_draw_str(canvas, 2, 42, m->last_msg);
+        canvas_draw_str(canvas, 2, 32, "STATUS: READY");
+        canvas_draw_str(canvas, 2, 45, "Press OK to write");
     }
-    
-    canvas_draw_str(canvas, 2, 62, "OK: Write Message");
 }
 
-// Таймер для обновления модели GUI (чтобы видеть анимацию отправки)
 static void scene_update_timer_callback(void* context) {
     ChatApp* app = context;
-    with_view_model(app->main_view, ChatModel* m, {
-        m->state = app->current_state;
-    }, true);
+    view_set_model_ready(app->main_view); // Принудительное обновление
 }
 
 static void text_input_done(void* ctx) {
     ChatApp* app = ctx;
     ChatMessage msg;
+    memset(&msg, 0, sizeof(ChatMessage));
     strncpy(msg.text, app->tx_buf, 63);
+    
     furi_message_queue_put(app->tx_queue, &msg, 0);
     view_dispatcher_switch_to_view(app->view_dispatcher, 0);
 }
@@ -114,7 +101,9 @@ static uint32_t back_to_main(void* ctx) { UNUSED(ctx); return 0; }
 static bool input_callback(InputEvent* event, void* ctx) {
     ChatApp* app = ctx;
     if(event->type == InputTypeShort && event->key == InputKeyOk) {
-        view_dispatcher_switch_to_view(app->view_dispatcher, 1);
+        if(app->current_state == ChatStateIdle) {
+            view_dispatcher_switch_to_view(app->view_dispatcher, 1);
+        }
         return true;
     }
     return false;
@@ -125,14 +114,12 @@ int32_t subghz_chat_app(void* p) {
     ChatApp* app = malloc(sizeof(ChatApp));
     memset(app, 0, sizeof(ChatApp));
     app->is_running = true;
-    app->current_state = ChatStateIdle;
 
     app->gui = furi_record_open(RECORD_GUI);
     app->view_dispatcher = view_dispatcher_alloc();
 
-    // Очередь и Поток (Стек 4096 как в Flipper Share)
-    app->tx_queue = furi_message_queue_alloc(4, sizeof(ChatMessage));
-    app->worker_thread = furi_thread_alloc_ex("SubChatWorker", 4096, chat_worker_thread, app);
+    app->tx_queue = furi_message_queue_alloc(2, sizeof(ChatMessage));
+    app->worker_thread = furi_thread_alloc_ex("SubChatWorker", 2048, chat_worker_thread, app);
     furi_thread_start(app->worker_thread);
 
     app->main_view = view_alloc();
@@ -150,7 +137,6 @@ int32_t subghz_chat_app(void* p) {
     view_dispatcher_attach_to_gui(app->view_dispatcher, app->gui, ViewDispatcherTypeFullscreen);
     view_dispatcher_switch_to_view(app->view_dispatcher, 0);
 
-    // Таймер обновления экрана (10 FPS)
     FuriTimer* timer = furi_timer_alloc(scene_update_timer_callback, FuriTimerTypePeriodic, app);
     furi_timer_start(timer, 100);
 
@@ -160,7 +146,6 @@ int32_t subghz_chat_app(void* p) {
 
     view_dispatcher_run(app->view_dispatcher);
 
-    // Cleanup
     furi_timer_stop(timer);
     furi_timer_free(timer);
     app->is_running = false;
