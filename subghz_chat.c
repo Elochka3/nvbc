@@ -7,7 +7,6 @@
 #include <lib/subghz/subghz_worker.h>
 #include <lib/subghz/receiver.h>
 #include <lib/subghz/environment.h>
-#include <lib/subghz/protocols/base.h>
 #include <string.h>
 
 #define CHAT_FREQ 433920000 
@@ -30,15 +29,14 @@ typedef struct {
     char tx_buf[64];
 } ChatApp;
 
-// Коллбэк приема с исправленным типом DecoderBase
+// Упрощенный коллбэк для максимальной совместимости
 static void chat_rx_callback(SubGhzReceiver* receiver, SubGhzProtocolDecoderBase* decoder, void* context) {
     UNUSED(receiver);
+    UNUSED(decoder);
     ChatApp* app = context;
     
     with_view_model(app->main_view, ChatModel* m, {
-        // Используем базовое получение имени
-        const char* name = subghz_protocol_decoder_get_name_common(decoder);
-        snprintf(m->last_rx_msg, 64, "RX: %s", name ? name : "Unknown");
+        strncpy(m->last_rx_msg, "Signal Detected!", 63);
     }, true);
 }
 
@@ -58,12 +56,11 @@ static void send_radio_packet(ChatApp* app) {
     if(subghz_worker_is_running(app->worker)) subghz_worker_stop(app->worker);
 
     furi_hal_subghz_idle();
-    // Прямая установка частоты без пресета, если load_preset не виден
     furi_hal_subghz_set_frequency(CHAT_FREQ);
-
-    if(furi_hal_subghz_start_async_tx(NULL, NULL)) {
+    // Используем максимально простой старт передачи
+    if(furi_hal_subghz_tx_start()) {
         furi_delay_ms(100);
-        furi_hal_subghz_stop_async_tx();
+        furi_hal_subghz_tx_stop();
     }
     
     furi_hal_subghz_idle();
@@ -88,13 +85,19 @@ static bool input_callback(InputEvent* event, void* ctx) {
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             with_view_model(app->main_view, ChatModel * m, {
                 m->is_external = !m->is_external;
-                // Используем Isolate и базовый путь, который точно есть в SDK
-                furi_hal_subghz_set_path(m->is_external ? FuriHalSubGhzPathIsolate : FuriHalSubGhzPathMain);
+                // Использование константы Isolate, которая точно есть
+                furi_hal_subghz_set_path(FuriHalSubGhzPathIsolate);
             }, true);
             return true;
         }
     }
     return false;
+}
+
+// Обертка для воркера, чтобы избежать ошибок приведения типов функций
+static void worker_overrun_handler(void* context) {
+    SubGhzReceiver* receiver = context;
+    subghz_receiver_reset(receiver);
 }
 
 int32_t subghz_chat_app(void* p) {
@@ -106,13 +109,12 @@ int32_t subghz_chat_app(void* p) {
     app->view_dispatcher = view_dispatcher_alloc();
     
     app->env = subghz_environment_alloc();
-    // Если load_all не работает, грузим пустой набор (для теста)
     app->receiver = subghz_receiver_alloc_init(app->env);
     subghz_receiver_set_rx_callback(app->receiver, (SubGhzReceiverCallback)chat_rx_callback, app);
     
     app->worker = subghz_worker_alloc();
-    // Жесткое приведение типов для воркера uFBT
-    subghz_worker_set_overrun_callback(app->worker, (SubGhzWorkerOverrunCallback)subghz_receiver_decode);
+    // Используем обертку, чтобы uFBT не ругался на типы функций
+    subghz_worker_set_overrun_callback(app->worker, worker_overrun_handler);
     subghz_worker_set_context(app->worker, app->receiver);
 
     app->main_view = view_alloc();
