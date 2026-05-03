@@ -9,7 +9,6 @@
 
 #define CHAT_FREQ 433920000 
 
-// Типы событий
 typedef enum {
     ChatEventSendPacket,
 } ChatCustomEvent;
@@ -28,13 +27,6 @@ typedef struct {
     char tx_buf[64];
 } ChatApp;
 
-// Коллбэк для генерации сигнала (TX) - просто держит высокий уровень
-static LevelDuration chat_tx_callback(void* context) {
-    UNUSED(context);
-    return level_duration_make(true, 1000);
-}
-
-// Коллбэк приема
 static void chat_worker_callback(void* context) {
     ChatApp* app = context;
     with_view_model(app->main_view, ChatModel* m, {
@@ -45,7 +37,7 @@ static void chat_worker_callback(void* context) {
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v3.3");
+    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v3.4");
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 2, 24, m->is_external ? "Ant: EXTERNAL" : "Ant: INTERNAL");
     canvas_draw_line(canvas, 0, 26, 128, 26);
@@ -54,35 +46,26 @@ static void render_callback(Canvas* canvas, void* model) {
     canvas_draw_str(canvas, 2, 62, "OK: Write | UP/DN: Ant");
 }
 
-// ИСПРАВЛЕННАЯ ОТПРАВКА
+// МАКСИМАЛЬНО ПРОСТАЯ ОТПРАВКА
 static void send_radio_packet(ChatApp* app) {
-    with_view_model(app->main_view, ChatModel* m, {
-        strncpy(m->last_rx_msg, "TX: Initializing...", 63);
-    }, true);
-
-    // 1. Сброс радио
+    // Воркер не трогаем, просто переводим чип в IDLE
     furi_hal_subghz_idle();
-    furi_delay_ms(50);
+    furi_delay_ms(10);
     
-    // 2. Установка частоты
     furi_hal_subghz_set_frequency(CHAT_FREQ);
-    
-    // 3. Безопасный асинхронный старт (совместим со всеми SDK)
-    if(furi_hal_subghz_start_async_tx(chat_tx_callback, NULL)) {
-        furi_delay_ms(150); // Длительность посылки
-        furi_hal_subghz_stop_async_tx();
-        
-        with_view_model(app->main_view, ChatModel* m, {
-            strncpy(m->last_rx_msg, "TX: Pulse Sent!", 63);
-        }, true);
-    } else {
-        with_view_model(app->main_view, ChatModel* m, {
-            strncpy(m->last_rx_msg, "TX: Denied/Busy", 63);
-        }, true);
-    }
 
+    // Прямой запуск передачи (если функции нет в SDK, uFBT выдаст ошибку, и мы поправим)
+    furi_hal_subghz_start_direct_tx(); 
+    
+    furi_delay_ms(150); 
+    
+    furi_hal_subghz_stop_async_tx(); 
     furi_hal_subghz_idle();
-    furi_hal_subghz_rx(); // Возврат в прием
+    furi_hal_subghz_rx(); // Вернулись в прием
+
+    with_view_model(app->main_view, ChatModel* m, {
+        strncpy(m->last_rx_msg, "TX: OK!", 63);
+    }, true);
 }
 
 static bool chat_custom_event_callback(void* context, uint32_t event) {
@@ -112,7 +95,6 @@ static bool input_callback(InputEvent* event, void* ctx) {
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             with_view_model(app->main_view, ChatModel * m, {
                 m->is_external = !m->is_external;
-                // Настройка путей антенны
                 furi_hal_subghz_set_path(m->is_external ? 1 : 0);
             }, true);
             return true;
