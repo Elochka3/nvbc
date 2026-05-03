@@ -24,10 +24,9 @@ typedef struct {
 } ChatApp;
 
 // Коллбэк для генерации сигнала (TX)
-// Возвращает уровень (высокий/низкий) и длительность в микросекундах
 static LevelDuration chat_tx_callback(void* context) {
     UNUSED(context);
-    // Генерируем меандр: 500мкс сигнал, 500мкс тишина
+    // Просто держим высокий уровень 500мкс, потом низкий 500мкс
     return level_duration_make(true, 500);
 }
 
@@ -41,7 +40,7 @@ static void chat_worker_callback(void* context) {
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v2.2");
+    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v2.3");
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 2, 24, m->is_external ? "Ant: EXTERNAL" : "Ant: INTERNAL");
     canvas_draw_line(canvas, 0, 26, 128, 26);
@@ -59,12 +58,10 @@ static void send_radio_packet(ChatApp* app) {
     furi_hal_subghz_idle();
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     
-    // Загружаем пресет, чтобы настроить модуляцию (OOK)
-    furi_hal_subghz_load_preset(FuriHalSubGhzPresetOok650Async);
-
-    // ВАЖНО: Передаем нашу функцию-коллбэк вместо данных
+    // Убрали load_preset, чтобы билд прошел на любой версии прошивки.
+    // async_tx сам инициализирует базовые параметры модуляции.
     if(furi_hal_subghz_start_async_tx(chat_tx_callback, NULL)) {
-        furi_delay_ms(200); // Вещаем 200 мс
+        furi_delay_ms(200); 
         furi_hal_subghz_stop_async_tx();
         
         with_view_model(app->main_view, ChatModel* m, {
@@ -95,6 +92,7 @@ static bool input_callback(InputEvent* event, void* ctx) {
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             with_view_model(app->main_view, ChatModel * m, {
                 m->is_external = !m->is_external;
+                // Прямое управление пинами антенны
                 furi_hal_subghz_set_path(m->is_external ? 1 : 0);
             }, true);
             return true;
