@@ -5,6 +5,10 @@
 #include <gui/modules/text_input.h>
 #include <furi_hal_subghz.h>
 #include <lib/subghz/subghz_worker.h>
+#include <lib/subghz/receiver.h>
+#include <lib/subghz/transmitter.h>
+#include <lib/subghz/environment.h>
+#include <lib/subghz/protocols/raw_generic.h>
 #include <string.h>
 
 #define CHAT_FREQ 433920000 
@@ -19,59 +23,58 @@ typedef struct {
     ViewDispatcher* view_dispatcher;
     View* main_view;
     TextInput* text_input;
-    SubGhzWorker* worker; // Добавили воркер для приема
+    
+    SubGhzWorker* worker;
+    SubGhzReceiver* receiver;
+    SubGhzEnvironment* env;
+    
     char tx_buf[64];
 } ChatApp;
 
-// Коллбэк воркера: вызывается при обнаружении любого сигнала в эфире
-static void chat_rx_worker_callback(void* context) {
+// Коллбэк приема данных: вызывается, когда декодер узнал протокол
+static void chat_rx_callback(SubGhzReceiver* receiver, SubGhzProtocolDecoder* decoder, void* context) {
+    UNUSED(receiver);
     ChatApp* app = context;
-    // В полноценном чате здесь должен быть декодер протокола.
-    // Пока просто сигнализируем в интерфейс, что что-то поймали.
+    
     with_view_model(app->main_view, ChatModel* m, {
-        strncpy(m->last_rx_msg, "Signal detected!", 63);
+        // Получаем имя протокола или данные (в упрощенном виде для теста)
+        snprintf(m->last_rx_msg, 64, "Msg: %s", subghz_protocol_decoder_get_name(decoder));
     }, true);
 }
 
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat (Unleashed)");
+    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v1.0");
     
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str(canvas, 2, 25, m->is_external ? "Ant: EXTERNAL" : "Ant: INTERNAL");
-    canvas_draw_line(canvas, 0, 28, 128, 28);
+    canvas_draw_str(canvas, 2, 24, m->is_external ? "Ant: EXTERNAL" : "Ant: INTERNAL");
+    canvas_draw_line(canvas, 0, 26, 128, 26);
     
-    canvas_draw_str(canvas, 2, 42, "Last RX:");
-    canvas_draw_str(canvas, 45, 42, m->last_rx_msg);
-    canvas_draw_str(canvas, 2, 52, "Status: Listening...");
-    canvas_draw_str(canvas, 2, 62, "OK: Write | UP/DN: Ant");
+    canvas_draw_str(canvas, 2, 40, "Last Message:");
+    canvas_set_font(canvas, FontSecondary);
+    canvas_draw_str(canvas, 2, 52, m->last_rx_msg);
+    
+    canvas_draw_str(canvas, 2, 62, "OK: Send | UP/DN: Ant");
 }
 
 static void send_radio_packet(ChatApp* app) {
-    // 1. Безопасная проверка частоты (чтобы не нарушать региональный лок)
     if(!furi_hal_subghz_is_tx_allowed(CHAT_FREQ)) return;
 
-    // 2. Останавливаем воркер приема, чтобы монопольно занять радиомодуль
-    if(subghz_worker_is_running(app->worker)) {
-        subghz_worker_stop(app->worker);
-    }
+    if(subghz_worker_is_running(app->worker)) subghz_worker_stop(app->worker);
 
     furi_hal_subghz_idle();
-    furi_hal_subghz_set_frequency(CHAT_FREQ);
     furi_hal_subghz_load_preset(FuriHalSubGhzPresetOok650Async);
+    furi_hal_subghz_set_frequency(CHAT_FREQ);
 
-    // 3. ПЕРЕДАЧА: Чтобы не было Kernel Panic, используем прямой TX старт
-    // В данном случае мы просто "светим" в эфир 100мс.
-    // Для текста сюда нужно добавить encoder (библиотека subghz_protocol_encoder)
-    if(furi_hal_subghz_tx_start()) {
-        furi_delay_ms(100); 
-        furi_hal_subghz_tx_stop();
+    // В полноценном режиме мы используем генерацию пакета
+    // Для простоты здесь имитация передачи (несущая)
+    if(furi_hal_subghz_start_async_tx(NULL, NULL)) {
+        furi_delay_ms(100);
+        furi_hal_subghz_stop_async_tx();
     }
     
     furi_hal_subghz_idle();
-
-    // 4. Возвращаемся в режим приема
     subghz_worker_start(app->worker);
 }
 
@@ -93,7 +96,6 @@ static bool input_callback(InputEvent* event, void* ctx) {
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             with_view_model(app->main_view, ChatModel * m, {
                 m->is_external = !m->is_external;
-                // Настройка антенн
                 furi_hal_subghz_set_path(m->is_external ? FuriHalSubGhzPathIsolate : FuriHalSubGhzPathMain);
             }, true);
             return true;
@@ -109,7 +111,15 @@ int32_t subghz_chat_app(void* p) {
     
     app->gui = furi_record_open(RECORD_GUI);
     app->view_dispatcher = view_dispatcher_alloc();
-    app->worker = subghz_worker_alloc(); // Инициализация воркера
+    
+    // Инициализация радио-стека
+    app->env = subghz_environment_alloc();
+    subghz_environment_load_all_protocols(app->env);
+    app->receiver = subghz_receiver_alloc_init(app->env);
+    subghz_receiver_set_rx_callback(app->receiver, chat_rx_callback, app);
+    
+    app->worker = subghz_worker_alloc();
+    subghz_worker_set_overrun_callback(app->worker, (SubGhzWorkerOverrunCallback)subghz_receiver_decode, app->receiver);
 
     app->main_view = view_alloc();
     view_allocate_model(app->main_view, ViewModelTypeLockFree, sizeof(ChatModel));
@@ -120,19 +130,15 @@ int32_t subghz_chat_app(void* p) {
 
     app->text_input = text_input_alloc();
     text_input_set_result_callback(app->text_input, text_input_done, app, app->tx_buf, 64, true);
-    text_input_set_header_text(app->text_input, "Message:");
     view_set_previous_callback(text_input_get_view(app->text_input), back_to_main_callback);
 
     view_dispatcher_add_view(app->view_dispatcher, 0, app->main_view);
     view_dispatcher_add_view(app->view_dispatcher, 1, text_input_get_view(app->text_input));
     
-    // Начальная настройка радио
+    // Настройка RX
     furi_hal_subghz_idle();
     furi_hal_subghz_load_preset(FuriHalSubGhzPresetOok650Async);
     furi_hal_subghz_set_frequency(CHAT_FREQ);
-    
-    // Запускаем воркер приема
-    subghz_worker_set_overrun_callback(app->worker, chat_rx_worker_callback);
     subghz_worker_start(app->worker);
 
     view_dispatcher_attach_to_gui(app->view_dispatcher, app->gui, ViewDispatcherTypeFullscreen);
@@ -140,9 +146,12 @@ int32_t subghz_chat_app(void* p) {
 
     view_dispatcher_run(app->view_dispatcher);
 
-    // Чистый выход: останавливаем воркер и выключаем радио
-    if(subghz_worker_is_running(app->worker)) subghz_worker_stop(app->worker);
+    // Очистка
+    subghz_worker_stop(app->worker);
     subghz_worker_free(app->worker);
+    subghz_receiver_free(app->receiver);
+    subghz_environment_free(app->env);
+    
     furi_hal_subghz_idle();
     furi_hal_subghz_sleep();
 
