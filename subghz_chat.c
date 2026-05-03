@@ -23,6 +23,14 @@ typedef struct {
     char tx_buf[64];
 } ChatApp;
 
+// Коллбэк для генерации сигнала (TX)
+// Возвращает уровень (высокий/низкий) и длительность в микросекундах
+static LevelDuration chat_tx_callback(void* context) {
+    UNUSED(context);
+    // Генерируем меандр: 500мкс сигнал, 500мкс тишина
+    return level_duration_make(true, 500);
+}
+
 static void chat_worker_callback(void* context) {
     ChatApp* app = context;
     with_view_model(app->main_view, ChatModel* m, {
@@ -33,41 +41,34 @@ static void chat_worker_callback(void* context) {
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v2.1");
+    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v2.2");
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 2, 24, m->is_external ? "Ant: EXTERNAL" : "Ant: INTERNAL");
     canvas_draw_line(canvas, 0, 26, 128, 26);
-    canvas_draw_str(canvas, 2, 42, "Last RX:");
+    canvas_draw_str(canvas, 2, 42, "Status:");
     canvas_draw_str(canvas, 45, 42, m->last_rx_msg);
     canvas_draw_str(canvas, 2, 62, "OK: Write | UP/DN: Ant");
 }
 
 static void send_radio_packet(ChatApp* app) {
-    // 1. Останавливаем прием
     if(subghz_worker_is_running(app->worker)) {
         subghz_worker_stop(app->worker);
     }
 
     furi_delay_ms(50);
     furi_hal_subghz_idle();
-    
-    // 2. Подготовка данных-пустышки (чтобы не было NULL Dereference)
-    uint8_t dummy_data[] = {0xAA, 0x55, 0xAA, 0x55}; 
-    
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     
-    // 3. Безопасный захват радио через легальный буфер
-    // Теперь вместо NULL мы передаем dummy_data
-    if(furi_hal_subghz_start_async_tx(dummy_data, sizeof(dummy_data))) {
-        furi_delay_ms(150);
+    // Загружаем пресет, чтобы настроить модуляцию (OOK)
+    furi_hal_subghz_load_preset(FuriHalSubGhzPresetOok650Async);
+
+    // ВАЖНО: Передаем нашу функцию-коллбэк вместо данных
+    if(furi_hal_subghz_start_async_tx(chat_tx_callback, NULL)) {
+        furi_delay_ms(200); // Вещаем 200 мс
         furi_hal_subghz_stop_async_tx();
         
         with_view_model(app->main_view, ChatModel* m, {
-            strncpy(m->last_rx_msg, "TX Success!", 63);
-        }, true);
-    } else {
-        with_view_model(app->main_view, ChatModel* m, {
-            strncpy(m->last_rx_msg, "TX Denied/Busy", 63);
+            strncpy(m->last_rx_msg, "TX: Sent Pulse", 63);
         }, true);
     }
 
@@ -109,7 +110,6 @@ int32_t subghz_chat_app(void* p) {
 
     app->gui = furi_record_open(RECORD_GUI);
     app->view_dispatcher = view_dispatcher_alloc();
-
     app->worker = subghz_worker_alloc();
     subghz_worker_set_overrun_callback(app->worker, chat_worker_callback);
     subghz_worker_set_context(app->worker, app);
@@ -130,8 +130,8 @@ int32_t subghz_chat_app(void* p) {
     view_dispatcher_attach_to_gui(app->view_dispatcher, app->gui, ViewDispatcherTypeFullscreen);
     
     view_dispatcher_switch_to_view(app->view_dispatcher, 0);
-    
     furi_delay_ms(300);
+    
     furi_hal_subghz_idle();
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     subghz_worker_start(app->worker);
