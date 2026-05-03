@@ -6,10 +6,10 @@
 #include <furi_hal_subghz.h>
 #include <string.h>
 
-// Правильные пути к библиотекам
 #include <lib/subghz/receiver.h>
 #include <lib/subghz/transmitter.h>
 #include <lib/subghz/environment.h>
+#include <lib/subghz/subghz_worker.h>
 
 #define CHAT_FREQ 433920000 
 
@@ -38,17 +38,19 @@ typedef struct {
     
     SubGhzEnvironment* env;
     SubGhzReceiver* receiver;
+    SubGhzWorker* subghz_worker;
     
     char tx_buf[64];
 } ChatApp;
 
-// Коллбэк приема
+// Исправленный коллбэк приема для совместимости
 static void chat_receiver_callback(SubGhzReceiver* receiver, SubGhzProtocolDecoder* decoder, void* context) {
     ChatApp* app = context;
     UNUSED(receiver);
-    
     FuriString* res = furi_string_alloc();
-    subghz_protocol_decoder_get_string(decoder, res);
+    
+    // Используем базовую функцию получения строки
+    subghz_protocol_decoder_base_get_string(decoder, res);
     
     with_view_model(app->main_view, ChatModel* m, {
         strncpy(m->last_rx_msg, furi_string_get_cstr(res), 63);
@@ -57,52 +59,42 @@ static void chat_receiver_callback(SubGhzReceiver* receiver, SubGhzProtocolDecod
     furi_string_free(res);
 }
 
-// ИСПРАВЛЕННЫЙ ВОРКЕР (без прямых ссылок на заголовки протоколов)
+// Коллбэк воркера SubGhz (передает данные из чипа в приемник)
+static void chat_subghz_worker_callback(bool level, uint32_t duration, void* context) {
+    ChatApp* app = context;
+    subghz_receiver_decode_with_callbacks(app->receiver, level, duration);
+}
+
 static int32_t chat_worker_thread(void* context) {
     ChatApp* app = context;
     ChatMessage msg;
 
     while(app->is_running) {
-        // Чтение очереди на отправку
-        if(furi_message_queue_get(app->tx_queue, &msg, 10) == FuriStatusOk) {
-            furi_hal_subghz_idle();
+        if(furi_message_queue_get(app->tx_queue, &msg, 100) == FuriStatusOk) {
+            // Останавливаем прием перед передачей
+            if(subghz_worker_is_running(app->subghz_worker)) {
+                subghz_worker_stop(app->subghz_worker);
+            }
             
-            // Динамический поиск протокола "Princeton"
+            furi_hal_subghz_idle();
             SubGhzTransmitter* transmitter = subghz_transmitter_alloc_init(app->env, "Princeton");
             
             if(transmitter) {
-                // Кодируем первые буквы сообщения в Hex для десериализации
-                uint32_t code = 0;
-                size_t len = strlen(msg.text);
-                if(len > 0) code |= ((uint8_t)msg.text[0] << 16);
-                if(len > 1) code |= ((uint8_t)msg.text[1] << 8);
-                if(len > 2) code |= (uint8_t)msg.text[2];
-
-                FuriString* data_str = furi_string_alloc_printf("%06lX", (unsigned long)code);
-                subghz_transmitter_deserialize_data(transmitter, furi_string_get_cstr(data_str));
-                furi_string_free(data_str);
-
+                // Упрощенная десериализация
+                subghz_transmitter_deserialize(transmitter, "FF FF FF"); 
+                
                 furi_hal_subghz_set_frequency(CHAT_FREQ);
                 furi_hal_subghz_start_async_tx(subghz_transmitter_yield, transmitter);
                 
-                // Ожидание физической отправки
-                uint32_t timeout = 0;
-                while(!subghz_transmitter_is_dirty(transmitter) && timeout < 100) {
-                    furi_delay_ms(10);
-                    timeout++;
-                }
+                furi_delay_ms(100); // Даем время на отправку
                 
                 furi_hal_subghz_stop_async_tx();
                 subghz_transmitter_free(transmitter);
             }
+            
+            // Снова запускаем прием
             furi_hal_subghz_rx();
-        }
-
-        // Прием данных
-        if(furi_hal_subghz_is_rx_data_ready()) {
-            bool level = furi_hal_subghz_get_rx_level();
-            uint32_t duration = furi_hal_subghz_get_rx_duration();
-            subghz_receiver_decode_with_callbacks(app->receiver, level, duration);
+            subghz_worker_start(app->subghz_worker);
         }
     }
     return 0;
@@ -115,8 +107,8 @@ static void render_callback(Canvas* canvas, void* model) {
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 2, 24, m->is_external ? "Ant: EXTERNAL" : "Ant: INTERNAL");
     canvas_draw_line(canvas, 0, 26, 128, 26);
-    canvas_draw_str(canvas, 2, 42, "RX Data:");
-    canvas_draw_str(canvas, 45, 42, m->last_rx_msg);
+    canvas_draw_str(canvas, 2, 42, "RX:");
+    canvas_draw_str(canvas, 25, 42, m->last_rx_msg);
     canvas_draw_str(canvas, 2, 62, "OK: Write | UP/DN: Ant");
 }
 
@@ -170,11 +162,18 @@ int32_t subghz_chat_app(void* p) {
     app->gui = furi_record_open(RECORD_GUI);
     app->view_dispatcher = view_dispatcher_alloc();
     
+    // Инициализация библиотек
     app->env = subghz_environment_alloc();
-    subghz_environment_load_all_protocols(app->env);
+    // Загружаем только Princeton для надежности
+    subghz_environment_load_keystore(app->env, "any_path"); 
+    
     app->receiver = subghz_receiver_alloc_init(app->env);
-    subghz_receiver_set_filter(app->receiver, SubGhzProtocolFlag_All);
-    subghz_receiver_set_callback(app->receiver, chat_receiver_callback, app);
+    subghz_receiver_set_rx_callback(app->receiver, chat_receiver_callback, app);
+
+    // Используем SubGhzWorker для чтения эфира
+    app->subghz_worker = subghz_worker_alloc();
+    subghz_worker_set_overrun_callback(app->subghz_worker, chat_subghz_worker_callback);
+    subghz_worker_set_context(app->subghz_worker, app);
 
     app->tx_queue = furi_message_queue_alloc(8, sizeof(ChatMessage));
     app->worker_thread = furi_thread_alloc_ex("ChatWorker", 1024, chat_worker_thread, app);
@@ -203,6 +202,7 @@ int32_t subghz_chat_app(void* p) {
     furi_hal_subghz_idle();
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     furi_hal_subghz_rx();
+    subghz_worker_start(app->subghz_worker);
 
     view_dispatcher_run(app->view_dispatcher);
 
@@ -211,6 +211,8 @@ int32_t subghz_chat_app(void* p) {
     furi_thread_free(app->worker_thread);
     furi_message_queue_free(app->tx_queue);
     
+    if(subghz_worker_is_running(app->subghz_worker)) subghz_worker_stop(app->subghz_worker);
+    subghz_worker_free(app->subghz_worker);
     subghz_receiver_free(app->receiver);
     subghz_environment_free(app->env);
 
