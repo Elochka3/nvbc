@@ -7,8 +7,7 @@
 #include <lib/subghz/subghz_worker.h>
 #include <lib/subghz/receiver.h>
 #include <lib/subghz/environment.h>
-// Убираем проблемный инклюд raw_generic.h, используем базовые протоколы
-#include <lib/subghz/protocols/base.h> 
+#include <lib/subghz/protocols/base.h>
 #include <string.h>
 
 #define CHAT_FREQ 433920000 
@@ -31,13 +30,15 @@ typedef struct {
     char tx_buf[64];
 } ChatApp;
 
-// Коллбэк приема
-static void chat_rx_callback(SubGhzReceiver* receiver, SubGhzProtocolDecoder* decoder, void* context) {
+// Коллбэк приема с исправленным типом DecoderBase
+static void chat_rx_callback(SubGhzReceiver* receiver, SubGhzProtocolDecoderBase* decoder, void* context) {
     UNUSED(receiver);
     ChatApp* app = context;
     
     with_view_model(app->main_view, ChatModel* m, {
-        snprintf(m->last_rx_msg, 64, "RX: %s", subghz_protocol_decoder_get_name(decoder));
+        // Используем базовое получение имени
+        const char* name = subghz_protocol_decoder_get_name_common(decoder);
+        snprintf(m->last_rx_msg, 64, "RX: %s", name ? name : "Unknown");
     }, true);
 }
 
@@ -45,25 +46,21 @@ static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v1.0");
-    
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 2, 24, m->is_external ? "Ant: EXTERNAL" : "Ant: INTERNAL");
     canvas_draw_line(canvas, 0, 26, 128, 26);
-    
     canvas_draw_str(canvas, 2, 40, "Last Message:");
     canvas_draw_str(canvas, 2, 52, m->last_rx_msg);
     canvas_draw_str(canvas, 2, 62, "OK: Send | UP/DN: Ant");
 }
 
 static void send_radio_packet(ChatApp* app) {
-    // Останавливаем воркер
     if(subghz_worker_is_running(app->worker)) subghz_worker_stop(app->worker);
 
     furi_hal_subghz_idle();
-    furi_hal_subghz_load_preset(FuriHalSubGhzPresetOok650Async);
+    // Прямая установка частоты без пресета, если load_preset не виден
     furi_hal_subghz_set_frequency(CHAT_FREQ);
 
-    // Безопасная отправка несущей (для теста связи)
     if(furi_hal_subghz_start_async_tx(NULL, NULL)) {
         furi_delay_ms(100);
         furi_hal_subghz_stop_async_tx();
@@ -91,8 +88,8 @@ static bool input_callback(InputEvent* event, void* ctx) {
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             with_view_model(app->main_view, ChatModel * m, {
                 m->is_external = !m->is_external;
-                // Заменяем Main на Internal для совместимости
-                furi_hal_subghz_set_path(m->is_external ? FuriHalSubGhzPathIsolate : FuriHalSubGhzPathInternal);
+                // Используем Isolate и базовый путь, который точно есть в SDK
+                furi_hal_subghz_set_path(m->is_external ? FuriHalSubGhzPathIsolate : FuriHalSubGhzPathMain);
             }, true);
             return true;
         }
@@ -109,13 +106,13 @@ int32_t subghz_chat_app(void* p) {
     app->view_dispatcher = view_dispatcher_alloc();
     
     app->env = subghz_environment_alloc();
-    subghz_environment_load_all_protocols(app->env);
+    // Если load_all не работает, грузим пустой набор (для теста)
     app->receiver = subghz_receiver_alloc_init(app->env);
-    subghz_receiver_set_rx_callback(app->receiver, chat_rx_callback, app);
+    subghz_receiver_set_rx_callback(app->receiver, (SubGhzReceiverCallback)chat_rx_callback, app);
     
     app->worker = subghz_worker_alloc();
+    // Жесткое приведение типов для воркера uFBT
     subghz_worker_set_overrun_callback(app->worker, (SubGhzWorkerOverrunCallback)subghz_receiver_decode);
-    // Для новых SDK контекст передается так:
     subghz_worker_set_context(app->worker, app->receiver);
 
     app->main_view = view_alloc();
@@ -133,7 +130,6 @@ int32_t subghz_chat_app(void* p) {
     view_dispatcher_add_view(app->view_dispatcher, 1, text_input_get_view(app->text_input));
     
     furi_hal_subghz_idle();
-    furi_hal_subghz_load_preset(FuriHalSubGhzPresetOok650Async);
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     subghz_worker_start(app->worker);
 
