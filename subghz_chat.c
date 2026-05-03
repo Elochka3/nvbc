@@ -21,11 +21,9 @@ typedef struct {
     ViewDispatcher* view_dispatcher;
     View* main_view;
     TextInput* text_input;
-    
     SubGhzWorker* worker;
     SubGhzReceiver* receiver;
     SubGhzEnvironment* env;
-    
     char tx_buf[64];
 } ChatApp;
 
@@ -33,7 +31,6 @@ static void chat_rx_callback(SubGhzReceiver* receiver, SubGhzProtocolDecoderBase
     UNUSED(receiver);
     UNUSED(decoder);
     ChatApp* app = context;
-    
     with_view_model(app->main_view, ChatModel* m, {
         strncpy(m->last_rx_msg, "Signal Detected!", 63);
     }, true);
@@ -42,9 +39,9 @@ static void chat_rx_callback(SubGhzReceiver* receiver, SubGhzProtocolDecoderBase
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v1.1");
+    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v1.2");
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str(canvas, 2, 24, m->is_external ? "Ant: EXTERNAL" : "Ant: INTERNAL");
+    canvas_draw_str(canvas, 2, 24, m->is_external ? "Ant: EXTERNAL (1)" : "Ant: INTERNAL (0)");
     canvas_draw_line(canvas, 0, 26, 128, 26);
     canvas_draw_str(canvas, 2, 40, "Last Message:");
     canvas_draw_str(canvas, 2, 52, m->last_rx_msg);
@@ -56,12 +53,11 @@ static void send_radio_packet(ChatApp* app) {
 
     furi_hal_subghz_idle();
     furi_hal_subghz_set_frequency(CHAT_FREQ);
-    furi_hal_subghz_load_preset(FuriHalSubGhzPresetOok650Async);
 
-    // Используем Direct TX (стандарт для большинства форков)
-    furi_hal_subghz_start_direct_tx();
+    // Используем максимально простую отправку
+    furi_hal_subghz_start_async_tx(NULL, NULL); 
     furi_delay_ms(150);
-    furi_hal_subghz_stop_direct_tx();
+    furi_hal_subghz_stop_async_tx();
     
     furi_hal_subghz_idle();
     subghz_worker_start(app->worker);
@@ -85,7 +81,8 @@ static bool input_callback(InputEvent* event, void* ctx) {
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             with_view_model(app->main_view, ChatModel * m, {
                 m->is_external = !m->is_external;
-                furi_hal_subghz_set_path(m->is_external ? FuriHalSubGhzPathIsolate : FuriHalSubGhzPathMain);
+                // Используем прямое приведение к int, если макросы не видны
+                furi_hal_subghz_set_path(m->is_external ? 1 : 0);
             }, true);
             return true;
         }
@@ -129,7 +126,6 @@ int32_t subghz_chat_app(void* p) {
     view_dispatcher_add_view(app->view_dispatcher, 1, text_input_get_view(app->text_input));
     
     furi_hal_subghz_idle();
-    furi_hal_subghz_load_preset(FuriHalSubGhzPresetOok650Async);
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     subghz_worker_start(app->worker);
 
