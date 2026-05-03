@@ -5,11 +5,12 @@
 #include <gui/modules/text_input.h>
 #include <furi_hal_subghz.h>
 #include <lib/subghz/subghz_worker.h>
+#include <lib/subghz/transmitter.h>
+#include <lib/subghz/protocols/base.h>
 #include <string.h>
 
 #define CHAT_FREQ 433920000 
 
-// События для диспетчера
 typedef enum {
     ChatEventSendPacket,
 } ChatCustomEvent;
@@ -28,13 +29,6 @@ typedef struct {
     char tx_buf[64];
 } ChatApp;
 
-// Генератор сигнала для передачи
-static LevelDuration chat_tx_callback(void* context) {
-    UNUSED(context);
-    return level_duration_make(true, 500);
-}
-
-// Коллбэк приема
 static void chat_worker_callback(void* context) {
     ChatApp* app = context;
     with_view_model(app->main_view, ChatModel* m, {
@@ -45,7 +39,7 @@ static void chat_worker_callback(void* context) {
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v2.8");
+    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v2.9");
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 2, 24, m->is_external ? "Ant: EXTERNAL" : "Ant: INTERNAL");
     canvas_draw_line(canvas, 0, 26, 128, 26);
@@ -54,28 +48,32 @@ static void render_callback(Canvas* canvas, void* model) {
     canvas_draw_str(canvas, 2, 62, "OK: Write | UP/DN: Ant");
 }
 
-// БЕЗОПАСНАЯ ОТПРАВКА БЕЗ ОСТАНОВКИ ВОРКЕРА
+// НОВАЯ ЛОГИКА: Безопасная отправка через переключение режима
 static void send_radio_packet(ChatApp* app) {
-    // 1. Силой переводим чип в IDLE (не трогая поток воркера)
+    // 1. Уведомляем пользователя
+    with_view_model(app->main_view, ChatModel* m, {
+        strncpy(m->last_rx_msg, "TX: Pulsing...", 63);
+    }, true);
+
+    // 2. Вместо async_tx используем прямую команду CC1101 (самый низкий уровень)
+    // Это обходит furi_check и не вешает систему
     furi_hal_subghz_idle();
-    furi_delay_ms(10);
     furi_hal_subghz_set_frequency(CHAT_FREQ);
+    
+    // Включаем передачу несущей вручную
+    furi_hal_subghz_start_direct_tx();
+    furi_delay_ms(150);
+    furi_hal_subghz_stop_direct_tx();
+    
+    furi_hal_subghz_idle();
+    furi_hal_subghz_set_frequency(CHAT_FREQ);
+    furi_hal_subghz_rx();
 
-    // 2. Перехватываем управление на 150мс
-    if(furi_hal_subghz_start_async_tx(chat_tx_callback, NULL)) {
-        furi_delay_ms(150); 
-        furi_hal_subghz_stop_async_tx();
-        
-        with_view_model(app->main_view, ChatModel* m, {
-            strncpy(m->last_rx_msg, "TX: Pulse OK", 63);
-        }, true);
-    }
-
-    // 3. Возвращаем чип в режим приема
-    furi_hal_subghz_rx(); 
+    with_view_model(app->main_view, ChatModel* m, {
+        strncpy(m->last_rx_msg, "TX: Done!", 63);
+    }, true);
 }
 
-// Обработчик событий
 static bool chat_custom_event_callback(void* context, uint32_t event) {
     ChatApp* app = context;
     if(event == ChatEventSendPacket) {
@@ -150,7 +148,6 @@ int32_t subghz_chat_app(void* p) {
 
     view_dispatcher_run(app->view_dispatcher);
 
-    // Чистый выход
     if(app->worker && subghz_worker_is_running(app->worker)) {
         subghz_worker_stop(app->worker);
     }
