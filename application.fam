@@ -5,4 +5,10 @@ App(
     entry_point="subghz_chat_app",
     stack_size=2 * 1024,
     fap_category="Sub-GHz",
+    # КРИТИЧНО: подключаем библиотеки радио и GUI
+    fap_libs=["subghz"],
+    fap_icon="subghz_chat_10px.png",  # Если есть иконка
+    fap_description="Simple chat for Flipper Zero",
+    fap_author="Elochka",
+    fap_weburl="https://github.com",
 )
