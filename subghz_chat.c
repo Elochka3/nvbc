@@ -23,7 +23,6 @@ typedef struct {
     char tx_buf[64];
 } ChatApp;
 
-// Легкий коллбэк для приема
 static void chat_worker_callback(void* context) {
     ChatApp* app = context;
     with_view_model(app->main_view, ChatModel* m, {
@@ -34,7 +33,7 @@ static void chat_worker_callback(void* context) {
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v1.8");
+    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v1.9");
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 2, 24, m->is_external ? "Ant: EXTERNAL" : "Ant: INTERNAL");
     canvas_draw_line(canvas, 0, 26, 128, 26);
@@ -44,24 +43,35 @@ static void render_callback(Canvas* canvas, void* model) {
 }
 
 static void send_radio_packet(ChatApp* app) {
-    // Временно останавливаем воркер приема
+    // 1. Останавливаем воркер
     if(subghz_worker_is_running(app->worker)) {
         subghz_worker_stop(app->worker);
     }
 
+    furi_delay_ms(50);
     furi_hal_subghz_idle();
-    furi_hal_subghz_set_frequency(CHAT_FREQ);
-
-    // Безопасная отправка несущей (без использования пресетов, которые ломают билд)
-    if(furi_hal_subghz_start_async_tx(NULL, NULL)) {
-        furi_delay_ms(150);
-        furi_hal_subghz_stop_async_tx();
+    
+    // 2. Проверка занятости (защита от furi_check)
+    if(!furi_hal_subghz_is_busy()) {
+        furi_hal_subghz_set_frequency(CHAT_FREQ);
+        
+        // Используем старый добрый метод передачи несущей
+        if(furi_hal_subghz_start_async_tx(NULL, NULL)) {
+            furi_delay_ms(150);
+            furi_hal_subghz_stop_async_tx();
+            
+            with_view_model(app->main_view, ChatModel* m, {
+                strncpy(m->last_rx_msg, "Sent OK!", 63);
+            }, true);
+        }
+    } else {
+        with_view_model(app->main_view, ChatModel* m, {
+            strncpy(m->last_rx_msg, "Error: Radio Busy", 63);
+        }, true);
     }
 
     furi_hal_subghz_idle();
-    
-    // Возвращаемся в RX через небольшую паузу
-    furi_delay_ms(10);
+    furi_delay_ms(50);
     subghz_worker_start(app->worker);
 }
 
@@ -71,8 +81,15 @@ static void text_input_done(void* ctx) {
     view_dispatcher_switch_to_view(app->view_dispatcher, 0);
 }
 
-static uint32_t prev_callback(void* ctx) { UNUSED(ctx); return VIEW_NONE; }
-static uint32_t back_to_main_callback(void* ctx) { UNUSED(ctx); return 0; }
+static uint32_t prev_callback(void* ctx) {
+    UNUSED(ctx);
+    return VIEW_NONE;
+}
+
+static uint32_t back_to_main_callback(void* ctx) {
+    UNUSED(ctx);
+    return 0;
+}
 
 static bool input_callback(InputEvent* event, void* ctx) {
     ChatApp* app = ctx;
@@ -83,7 +100,6 @@ static bool input_callback(InputEvent* event, void* ctx) {
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             with_view_model(app->main_view, ChatModel * m, {
                 m->is_external = !m->is_external;
-                // В Unleashed 0 - Internal, 1 - External
                 furi_hal_subghz_set_path(m->is_external ? 1 : 0);
             }, true);
             return true;
@@ -100,7 +116,6 @@ int32_t subghz_chat_app(void* p) {
     app->gui = furi_record_open(RECORD_GUI);
     app->view_dispatcher = view_dispatcher_alloc();
 
-    // Инициализация воркера (без запуска)
     app->worker = subghz_worker_alloc();
     subghz_worker_set_overrun_callback(app->worker, chat_worker_callback);
     subghz_worker_set_context(app->worker, app);
@@ -120,10 +135,8 @@ int32_t subghz_chat_app(void* p) {
     view_dispatcher_add_view(app->view_dispatcher, 1, text_input_get_view(app->text_input));
     view_dispatcher_attach_to_gui(app->view_dispatcher, app->gui, ViewDispatcherTypeFullscreen);
     
-    // Сначала показываем экран
     view_dispatcher_switch_to_view(app->view_dispatcher, 0);
     
-    // Пауза перед активацией железа (лечит ошибку "r")
     furi_delay_ms(300);
     furi_hal_subghz_idle();
     furi_hal_subghz_set_frequency(CHAT_FREQ);
@@ -131,7 +144,6 @@ int32_t subghz_chat_app(void* p) {
 
     view_dispatcher_run(app->view_dispatcher);
 
-    // Безопасная очистка
     if(subghz_worker_is_running(app->worker)) {
         subghz_worker_stop(app->worker);
     }
@@ -147,3 +159,4 @@ int32_t subghz_chat_app(void* p) {
     free(app);
     return 0;
 }
+
