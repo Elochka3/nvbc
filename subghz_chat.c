@@ -26,7 +26,6 @@ typedef struct {
 // Коллбэк для генерации сигнала (TX)
 static LevelDuration chat_tx_callback(void* context) {
     UNUSED(context);
-    // Просто держим высокий уровень 500мкс, потом низкий 500мкс
     return level_duration_make(true, 500);
 }
 
@@ -40,7 +39,7 @@ static void chat_worker_callback(void* context) {
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v2.3");
+    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v2.6");
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 2, 24, m->is_external ? "Ant: EXTERNAL" : "Ant: INTERNAL");
     canvas_draw_line(canvas, 0, 26, 128, 26);
@@ -50,28 +49,25 @@ static void render_callback(Canvas* canvas, void* model) {
 }
 
 static void send_radio_packet(ChatApp* app) {
-    if(subghz_worker_is_running(app->worker)) {
-        subghz_worker_stop(app->worker);
-    }
-
-    furi_delay_ms(50);
+    // ВАЖНО: Мы переводим радио в IDLE силой, но не трогаем поток воркера
     furi_hal_subghz_idle();
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     
-    // Убрали load_preset, чтобы билд прошел на любой версии прошивки.
-    // async_tx сам инициализирует базовые параметры модуляции.
+    // Пытаемся запустить передачу через асинхронный метод (он самый совместимый)
+    // chat_tx_callback уже объявлен выше
     if(furi_hal_subghz_start_async_tx(chat_tx_callback, NULL)) {
-        furi_delay_ms(200); 
+        furi_delay_ms(150); 
         furi_hal_subghz_stop_async_tx();
         
         with_view_model(app->main_view, ChatModel* m, {
-            strncpy(m->last_rx_msg, "TX: Sent Pulse", 63);
+            strncpy(m->last_rx_msg, "TX: Pulse OK", 63);
         }, true);
     }
 
     furi_hal_subghz_idle();
-    furi_delay_ms(50);
-    subghz_worker_start(app->worker);
+    
+    // Возвращаем чип в режим приема
+    furi_hal_subghz_rx(); 
 }
 
 static void text_input_done(void* ctx) {
@@ -92,7 +88,6 @@ static bool input_callback(InputEvent* event, void* ctx) {
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             with_view_model(app->main_view, ChatModel * m, {
                 m->is_external = !m->is_external;
-                // Прямое управление пинами антенны
                 furi_hal_subghz_set_path(m->is_external ? 1 : 0);
             }, true);
             return true;
