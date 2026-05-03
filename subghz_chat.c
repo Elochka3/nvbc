@@ -9,7 +9,7 @@
 
 #define CHAT_FREQ 433920000 
 
-// Типы событий для диспетчера
+// События для диспетчера
 typedef enum {
     ChatEventSendPacket,
 } ChatCustomEvent;
@@ -28,11 +28,13 @@ typedef struct {
     char tx_buf[64];
 } ChatApp;
 
+// Генератор сигнала для передачи
 static LevelDuration chat_tx_callback(void* context) {
     UNUSED(context);
     return level_duration_make(true, 500);
 }
 
+// Коллбэк приема
 static void chat_worker_callback(void* context) {
     ChatApp* app = context;
     with_view_model(app->main_view, ChatModel* m, {
@@ -43,7 +45,7 @@ static void chat_worker_callback(void* context) {
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v2.7");
+    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v2.8");
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 2, 24, m->is_external ? "Ant: EXTERNAL" : "Ant: INTERNAL");
     canvas_draw_line(canvas, 0, 26, 128, 26);
@@ -52,13 +54,14 @@ static void render_callback(Canvas* canvas, void* model) {
     canvas_draw_str(canvas, 2, 62, "OK: Write | UP/DN: Ant");
 }
 
-// Теперь эта функция вызывается ВНЕ потока GUI
+// БЕЗОПАСНАЯ ОТПРАВКА БЕЗ ОСТАНОВКИ ВОРКЕРА
 static void send_radio_packet(ChatApp* app) {
-    if(subghz_worker_is_running(app->worker)) subghz_worker_stop(app->worker);
-
+    // 1. Силой переводим чип в IDLE (не трогая поток воркера)
     furi_hal_subghz_idle();
+    furi_delay_ms(10);
     furi_hal_subghz_set_frequency(CHAT_FREQ);
-    
+
+    // 2. Перехватываем управление на 150мс
     if(furi_hal_subghz_start_async_tx(chat_tx_callback, NULL)) {
         furi_delay_ms(150); 
         furi_hal_subghz_stop_async_tx();
@@ -68,11 +71,11 @@ static void send_radio_packet(ChatApp* app) {
         }, true);
     }
 
-    furi_hal_subghz_idle();
-    subghz_worker_start(app->worker);
+    // 3. Возвращаем чип в режим приема
+    furi_hal_subghz_rx(); 
 }
 
-// Обработчик кастомных событий (ключевой момент для предотвращения фризов)
+// Обработчик событий
 static bool chat_custom_event_callback(void* context, uint32_t event) {
     ChatApp* app = context;
     if(event == ChatEventSendPacket) {
@@ -84,7 +87,6 @@ static bool chat_custom_event_callback(void* context, uint32_t event) {
 
 static void text_input_done(void* ctx) {
     ChatApp* app = ctx;
-    // Вместо прямого вызова TX, кидаем событие в очередь диспетчера
     view_dispatcher_send_custom_event(app->view_dispatcher, ChatEventSendPacket);
     view_dispatcher_switch_to_view(app->view_dispatcher, 0);
 }
@@ -117,7 +119,6 @@ int32_t subghz_chat_app(void* p) {
     app->gui = furi_record_open(RECORD_GUI);
     app->view_dispatcher = view_dispatcher_alloc();
     
-    // Регистрируем обработчик событий
     view_dispatcher_set_event_callback_context(app->view_dispatcher, app);
     view_dispatcher_set_custom_event_callback(app->view_dispatcher, chat_custom_event_callback);
 
@@ -149,7 +150,10 @@ int32_t subghz_chat_app(void* p) {
 
     view_dispatcher_run(app->view_dispatcher);
 
-    if(subghz_worker_is_running(app->worker)) subghz_worker_stop(app->worker);
+    // Чистый выход
+    if(app->worker && subghz_worker_is_running(app->worker)) {
+        subghz_worker_stop(app->worker);
+    }
     subghz_worker_free(app->worker);
     furi_hal_subghz_idle();
 
