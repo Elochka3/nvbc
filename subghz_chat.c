@@ -14,11 +14,11 @@ typedef enum {
 } ChatState;
 
 typedef struct {
-    char text[64]; // ИСПРАВЛЕНО: Массив, а не символ
+    char text[64]; 
 } ChatMessage;
 
 typedef struct {
-    char last_msg[64]; // ИСПРАВЛЕНО
+    char last_msg[64];
     ChatState state;
 } ChatModel;
 
@@ -34,11 +34,13 @@ typedef struct {
     char tx_buf[64];
 } ChatApp;
 
+// Тестовый импульс
 static LevelDuration chat_tx_callback_payload(void* context) {
     UNUSED(context);
     return level_duration_make(true, 500); 
 }
 
+// Поток радио (отделен от GUI)
 static int32_t chat_worker_thread(void* context) {
     ChatApp* app = context;
     ChatMessage msg;
@@ -48,11 +50,11 @@ static int32_t chat_worker_thread(void* context) {
             app->current_state = ChatStateSending;
             
             furi_hal_subghz_idle();
-            furi_delay_ms(50); // Даем чипу остыть
+            furi_delay_ms(50);
             furi_hal_subghz_set_frequency(CHAT_FREQ);
             
             if(furi_hal_subghz_start_async_tx(chat_tx_callback_payload, NULL)) {
-                furi_delay_ms(200); 
+                furi_delay_ms(300); // Имитация долгой отправки для теста анимации
                 furi_hal_subghz_stop_async_tx();
             }
             
@@ -68,22 +70,26 @@ static int32_t chat_worker_thread(void* context) {
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v6.1");
+    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v6.1.1");
     
     canvas_set_font(canvas, FontSecondary);
     if(m->state == ChatStateSending) {
         canvas_draw_str(canvas, 2, 32, "STATUS: SENDING...");
-        // Анимация прогресс-бара
-        canvas_draw_box(canvas, 2, 40, (furi_get_tick() % 120), 4);
+        // Анимация "бегущего квадрата"
+        int progress = (furi_get_tick() % 100);
+        canvas_draw_box(canvas, 2 + progress, 40, 10, 4);
     } else {
         canvas_draw_str(canvas, 2, 32, "STATUS: READY");
         canvas_draw_str(canvas, 2, 45, "Press OK to write");
     }
 }
 
+// Правильное обновление модели по таймеру
 static void scene_update_timer_callback(void* context) {
     ChatApp* app = context;
-    view_set_model_ready(app->main_view); // Принудительное обновление
+    with_view_model(app->main_view, ChatModel* m, {
+        m->state = app->current_state;
+    }, true); // true автоматически делает commit
 }
 
 static void text_input_done(void* ctx) {
@@ -138,7 +144,7 @@ int32_t subghz_chat_app(void* p) {
     view_dispatcher_switch_to_view(app->view_dispatcher, 0);
 
     FuriTimer* timer = furi_timer_alloc(scene_update_timer_callback, FuriTimerTypePeriodic, app);
-    furi_timer_start(timer, 100);
+    furi_timer_start(timer, 50); // 20 FPS для плавной анимации
 
     furi_hal_subghz_idle();
     furi_hal_subghz_set_frequency(CHAT_FREQ);
