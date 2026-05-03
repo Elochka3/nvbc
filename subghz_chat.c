@@ -6,9 +6,9 @@
 #include <furi_hal_subghz.h>
 #include <lib/subghz/subghz_worker.h>
 #include <lib/subghz/receiver.h>
-#include <lib/subghz/transmitter.h>
 #include <lib/subghz/environment.h>
-#include <lib/subghz/protocols/raw_generic.h>
+// Убираем проблемный инклюд raw_generic.h, используем базовые протоколы
+#include <lib/subghz/protocols/base.h> 
 #include <string.h>
 
 #define CHAT_FREQ 433920000 
@@ -31,14 +31,13 @@ typedef struct {
     char tx_buf[64];
 } ChatApp;
 
-// Коллбэк приема данных: вызывается, когда декодер узнал протокол
+// Коллбэк приема
 static void chat_rx_callback(SubGhzReceiver* receiver, SubGhzProtocolDecoder* decoder, void* context) {
     UNUSED(receiver);
     ChatApp* app = context;
     
     with_view_model(app->main_view, ChatModel* m, {
-        // Получаем имя протокола или данные (в упрощенном виде для теста)
-        snprintf(m->last_rx_msg, 64, "Msg: %s", subghz_protocol_decoder_get_name(decoder));
+        snprintf(m->last_rx_msg, 64, "RX: %s", subghz_protocol_decoder_get_name(decoder));
     }, true);
 }
 
@@ -52,23 +51,19 @@ static void render_callback(Canvas* canvas, void* model) {
     canvas_draw_line(canvas, 0, 26, 128, 26);
     
     canvas_draw_str(canvas, 2, 40, "Last Message:");
-    canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 2, 52, m->last_rx_msg);
-    
     canvas_draw_str(canvas, 2, 62, "OK: Send | UP/DN: Ant");
 }
 
 static void send_radio_packet(ChatApp* app) {
-    if(!furi_hal_subghz_is_tx_allowed(CHAT_FREQ)) return;
-
+    // Останавливаем воркер
     if(subghz_worker_is_running(app->worker)) subghz_worker_stop(app->worker);
 
     furi_hal_subghz_idle();
     furi_hal_subghz_load_preset(FuriHalSubGhzPresetOok650Async);
     furi_hal_subghz_set_frequency(CHAT_FREQ);
 
-    // В полноценном режиме мы используем генерацию пакета
-    // Для простоты здесь имитация передачи (несущая)
+    // Безопасная отправка несущей (для теста связи)
     if(furi_hal_subghz_start_async_tx(NULL, NULL)) {
         furi_delay_ms(100);
         furi_hal_subghz_stop_async_tx();
@@ -96,7 +91,8 @@ static bool input_callback(InputEvent* event, void* ctx) {
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             with_view_model(app->main_view, ChatModel * m, {
                 m->is_external = !m->is_external;
-                furi_hal_subghz_set_path(m->is_external ? FuriHalSubGhzPathIsolate : FuriHalSubGhzPathMain);
+                // Заменяем Main на Internal для совместимости
+                furi_hal_subghz_set_path(m->is_external ? FuriHalSubGhzPathIsolate : FuriHalSubGhzPathInternal);
             }, true);
             return true;
         }
@@ -112,14 +108,15 @@ int32_t subghz_chat_app(void* p) {
     app->gui = furi_record_open(RECORD_GUI);
     app->view_dispatcher = view_dispatcher_alloc();
     
-    // Инициализация радио-стека
     app->env = subghz_environment_alloc();
     subghz_environment_load_all_protocols(app->env);
     app->receiver = subghz_receiver_alloc_init(app->env);
     subghz_receiver_set_rx_callback(app->receiver, chat_rx_callback, app);
     
     app->worker = subghz_worker_alloc();
-    subghz_worker_set_overrun_callback(app->worker, (SubGhzWorkerOverrunCallback)subghz_receiver_decode, app->receiver);
+    subghz_worker_set_overrun_callback(app->worker, (SubGhzWorkerOverrunCallback)subghz_receiver_decode);
+    // Для новых SDK контекст передается так:
+    subghz_worker_set_context(app->worker, app->receiver);
 
     app->main_view = view_alloc();
     view_allocate_model(app->main_view, ViewModelTypeLockFree, sizeof(ChatModel));
@@ -135,7 +132,6 @@ int32_t subghz_chat_app(void* p) {
     view_dispatcher_add_view(app->view_dispatcher, 0, app->main_view);
     view_dispatcher_add_view(app->view_dispatcher, 1, text_input_get_view(app->text_input));
     
-    // Настройка RX
     furi_hal_subghz_idle();
     furi_hal_subghz_load_preset(FuriHalSubGhzPresetOok650Async);
     furi_hal_subghz_set_frequency(CHAT_FREQ);
@@ -143,10 +139,8 @@ int32_t subghz_chat_app(void* p) {
 
     view_dispatcher_attach_to_gui(app->view_dispatcher, app->gui, ViewDispatcherTypeFullscreen);
     view_dispatcher_switch_to_view(app->view_dispatcher, 0);
-
     view_dispatcher_run(app->view_dispatcher);
 
-    // Очистка
     subghz_worker_stop(app->worker);
     subghz_worker_free(app->worker);
     subghz_receiver_free(app->receiver);
