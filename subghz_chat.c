@@ -29,47 +29,34 @@ typedef struct {
     char tx_buf[64];
 } ChatApp;
 
-// Коллбэк приема
 static void chat_rx_callback(SubGhzReceiver* receiver, SubGhzProtocolDecoderBase* decoder, void* context) {
-    UNUSED(receiver);
-    UNUSED(decoder);
+    UNUSED(receiver); UNUSED(decoder);
     ChatApp* app = context;
-    
     with_view_model(app->main_view, ChatModel* m, {
         strncpy(m->last_rx_msg, "Signal Detected!", 63);
     }, true);
 }
 
-// Отрисовка
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v1.3");
-    
+    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v1.4");
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 2, 24, m->is_external ? "Ant: EXTERNAL" : "Ant: INTERNAL");
     canvas_draw_line(canvas, 0, 26, 128, 26);
-    
     canvas_draw_str(canvas, 2, 40, "Last Message:");
     canvas_draw_str(canvas, 2, 52, m->last_rx_msg);
-    canvas_draw_str(canvas, 2, 62, "OK: Write | UP/DN: Ant");
+    canvas_draw_str(canvas, 2, 62, "OK: Send | UP/DN: Ant");
 }
 
-// Безопасная отправка
 static void send_radio_packet(ChatApp* app) {
-    if(subghz_worker_is_running(app->worker)) {
-        subghz_worker_stop(app->worker);
-    }
-
+    if(subghz_worker_is_running(app->worker)) subghz_worker_stop(app->worker);
     furi_hal_subghz_idle();
     furi_hal_subghz_set_frequency(CHAT_FREQ);
-
-    // Самый безопасный метод передачи в Unleashed
-    if(furi_hal_subghz_start_async_tx(NULL, NULL)) {
-        furi_delay_ms(150);
-        furi_hal_subghz_stop_async_tx();
-    }
-    
+    // Безопасный старт/стоп без DMA (Direct TX)
+    furi_hal_subghz_start_direct_tx();
+    furi_delay_ms(100);
+    furi_hal_subghz_stop_direct_tx();
     furi_hal_subghz_idle();
     subghz_worker_start(app->worker);
 }
@@ -92,7 +79,6 @@ static bool input_callback(InputEvent* event, void* ctx) {
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             with_view_model(app->main_view, ChatModel * m, {
                 m->is_external = !m->is_external;
-                // В Unleashed 0 - внутренняя, 1 - внешняя
                 furi_hal_subghz_set_path(m->is_external ? 1 : 0);
             }, true);
             return true;
@@ -106,25 +92,23 @@ static void worker_overrun_handler(void* context) {
     if(receiver) subghz_receiver_reset(receiver);
 }
 
-// ГЛАВНАЯ ФУНКЦИЯ (Исправленный порядок)
 int32_t subghz_chat_app(void* p) {
     UNUSED(p);
     ChatApp* app = malloc(sizeof(ChatApp));
     memset(app, 0, sizeof(ChatApp));
-    
-    // 1. Инициализация ресурсов GUI
+
     app->gui = furi_record_open(RECORD_GUI);
     app->view_dispatcher = view_dispatcher_alloc();
-    
-    // 2. Инициализация Радио
+
+    // ВАЖНО: Инициализация Environment ДО создания Receiver
     app->env = subghz_environment_alloc();
     app->receiver = subghz_receiver_alloc_init(app->env);
     subghz_receiver_set_rx_callback(app->receiver, (SubGhzReceiverCallback)chat_rx_callback, app);
+    
     app->worker = subghz_worker_alloc();
     subghz_worker_set_overrun_callback(app->worker, worker_overrun_handler);
     subghz_worker_set_context(app->worker, app->receiver);
 
-    // 3. Создание View
     app->main_view = view_alloc();
     view_allocate_model(app->main_view, ViewModelTypeLockFree, sizeof(ChatModel));
     view_set_context(app->main_view, app);
@@ -136,21 +120,20 @@ int32_t subghz_chat_app(void* p) {
     text_input_set_result_callback(app->text_input, text_input_done, app, app->tx_buf, 64, true);
     view_set_previous_callback(text_input_get_view(app->text_input), back_to_main_callback);
 
-    // 4. Сборка ViewDispatcher
     view_dispatcher_add_view(app->view_dispatcher, 0, app->main_view);
     view_dispatcher_add_view(app->view_dispatcher, 1, text_input_get_view(app->text_input));
     view_dispatcher_attach_to_gui(app->view_dispatcher, app->gui, ViewDispatcherTypeFullscreen);
     
-    // 5. Предварительная настройка радио
+    // ПАУЗА для стабилизации системы перед захватом радио
+    furi_delay_ms(200);
     furi_hal_subghz_idle();
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     subghz_worker_start(app->worker);
 
-    // 6. Запуск
     view_dispatcher_switch_to_view(app->view_dispatcher, 0);
     view_dispatcher_run(app->view_dispatcher);
 
-    // 7. Корректное освобождение памяти (в обратном порядке)
+    // Чистим всё максимально аккуратно
     if(subghz_worker_is_running(app->worker)) subghz_worker_stop(app->worker);
     subghz_worker_free(app->worker);
     subghz_receiver_free(app->receiver);
@@ -161,9 +144,7 @@ int32_t subghz_chat_app(void* p) {
     text_input_free(app->text_input);
     view_free(app->main_view);
     view_dispatcher_free(app->view_dispatcher);
-    
     furi_record_close(RECORD_GUI);
     free(app);
-    
     return 0;
 }
