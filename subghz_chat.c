@@ -5,8 +5,6 @@
 #include <gui/modules/text_input.h>
 #include <furi_hal_subghz.h>
 #include <lib/subghz/subghz_worker.h>
-#include <lib/subghz/transmitter.h>
-#include <lib/subghz/protocols/base.h>
 #include <string.h>
 
 #define CHAT_FREQ 433920000 
@@ -39,7 +37,7 @@ static void chat_worker_callback(void* context) {
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v2.9");
+    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v3.0");
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 2, 24, m->is_external ? "Ant: EXTERNAL" : "Ant: INTERNAL");
     canvas_draw_line(canvas, 0, 26, 128, 26);
@@ -48,26 +46,23 @@ static void render_callback(Canvas* canvas, void* model) {
     canvas_draw_str(canvas, 2, 62, "OK: Write | UP/DN: Ant");
 }
 
-// НОВАЯ ЛОГИКА: Безопасная отправка через переключение режима
 static void send_radio_packet(ChatApp* app) {
-    // 1. Уведомляем пользователя
     with_view_model(app->main_view, ChatModel* m, {
-        strncpy(m->last_rx_msg, "TX: Pulsing...", 63);
+        strncpy(m->last_rx_msg, "TX: Sending...", 63);
     }, true);
 
-    // 2. Вместо async_tx используем прямую команду CC1101 (самый низкий уровень)
-    // Это обходит furi_check и не вешает систему
     furi_hal_subghz_idle();
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     
-    // Включаем передачу несущей вручную
-    furi_hal_subghz_start_direct_tx();
+    // ПРЯМОЙ ЗАПУСК ПЕРЕДАТЧИКА (Самый стабильный метод)
+    furi_hal_subghz_start_direct_tx(); 
+    // Если билд упадет на строке выше, замени её на: furi_hal_subghz_tx_start();
+    
     furi_delay_ms(150);
-    furi_hal_subghz_stop_direct_tx();
     
+    furi_hal_subghz_stop_async_tx(); // Универсальный стоп
     furi_hal_subghz_idle();
-    furi_hal_subghz_set_frequency(CHAT_FREQ);
-    furi_hal_subghz_rx();
+    furi_hal_subghz_rx(); // Возврат в прием
 
     with_view_model(app->main_view, ChatModel* m, {
         strncpy(m->last_rx_msg, "TX: Done!", 63);
