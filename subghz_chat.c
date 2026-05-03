@@ -9,6 +9,11 @@
 
 #define CHAT_FREQ 433920000 
 
+// Типы событий для диспетчера
+typedef enum {
+    ChatEventSendPacket,
+} ChatCustomEvent;
+
 typedef struct {
     char last_rx_msg[64];
     bool is_external;
@@ -23,7 +28,6 @@ typedef struct {
     char tx_buf[64];
 } ChatApp;
 
-// Коллбэк для генерации сигнала (TX)
 static LevelDuration chat_tx_callback(void* context) {
     UNUSED(context);
     return level_duration_make(true, 500);
@@ -39,7 +43,7 @@ static void chat_worker_callback(void* context) {
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v2.6");
+    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v2.7");
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 2, 24, m->is_external ? "Ant: EXTERNAL" : "Ant: INTERNAL");
     canvas_draw_line(canvas, 0, 26, 128, 26);
@@ -48,13 +52,13 @@ static void render_callback(Canvas* canvas, void* model) {
     canvas_draw_str(canvas, 2, 62, "OK: Write | UP/DN: Ant");
 }
 
+// Теперь эта функция вызывается ВНЕ потока GUI
 static void send_radio_packet(ChatApp* app) {
-    // ВАЖНО: Мы переводим радио в IDLE силой, но не трогаем поток воркера
+    if(subghz_worker_is_running(app->worker)) subghz_worker_stop(app->worker);
+
     furi_hal_subghz_idle();
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     
-    // Пытаемся запустить передачу через асинхронный метод (он самый совместимый)
-    // chat_tx_callback уже объявлен выше
     if(furi_hal_subghz_start_async_tx(chat_tx_callback, NULL)) {
         furi_delay_ms(150); 
         furi_hal_subghz_stop_async_tx();
@@ -65,14 +69,23 @@ static void send_radio_packet(ChatApp* app) {
     }
 
     furi_hal_subghz_idle();
-    
-    // Возвращаем чип в режим приема
-    furi_hal_subghz_rx(); 
+    subghz_worker_start(app->worker);
+}
+
+// Обработчик кастомных событий (ключевой момент для предотвращения фризов)
+static bool chat_custom_event_callback(void* context, uint32_t event) {
+    ChatApp* app = context;
+    if(event == ChatEventSendPacket) {
+        send_radio_packet(app);
+        return true;
+    }
+    return false;
 }
 
 static void text_input_done(void* ctx) {
     ChatApp* app = ctx;
-    send_radio_packet(app);
+    // Вместо прямого вызова TX, кидаем событие в очередь диспетчера
+    view_dispatcher_send_custom_event(app->view_dispatcher, ChatEventSendPacket);
     view_dispatcher_switch_to_view(app->view_dispatcher, 0);
 }
 
@@ -103,6 +116,11 @@ int32_t subghz_chat_app(void* p) {
 
     app->gui = furi_record_open(RECORD_GUI);
     app->view_dispatcher = view_dispatcher_alloc();
+    
+    // Регистрируем обработчик событий
+    view_dispatcher_set_event_callback_context(app->view_dispatcher, app);
+    view_dispatcher_set_custom_event_callback(app->view_dispatcher, chat_custom_event_callback);
+
     app->worker = subghz_worker_alloc();
     subghz_worker_set_overrun_callback(app->worker, chat_worker_callback);
     subghz_worker_set_context(app->worker, app);
