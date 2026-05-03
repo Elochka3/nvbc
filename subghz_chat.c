@@ -33,7 +33,7 @@ static void chat_worker_callback(void* context) {
 static void render_callback(Canvas* canvas, void* model) {
     ChatModel* m = model;
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v2.0");
+    canvas_draw_str(canvas, 2, 12, "Sub-GHz Chat v2.1");
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 2, 24, m->is_external ? "Ant: EXTERNAL" : "Ant: INTERNAL");
     canvas_draw_line(canvas, 0, 26, 128, 26);
@@ -43,38 +43,36 @@ static void render_callback(Canvas* canvas, void* model) {
 }
 
 static void send_radio_packet(ChatApp* app) {
-    // 1. Останавливаем воркер
+    // 1. Останавливаем прием
     if(subghz_worker_is_running(app->worker)) {
         subghz_worker_stop(app->worker);
     }
 
     furi_delay_ms(50);
-    
-    // 2. Безопасный переход в IDLE
     furi_hal_subghz_idle();
     
-    // Вместо проблемной is_busy проверяем возможность передачи напрямую
-    // В большинстве SDK Unleashed это работает без паники
+    // 2. Подготовка данных-пустышки (чтобы не было NULL Dereference)
+    uint8_t dummy_data[] = {0xAA, 0x55, 0xAA, 0x55}; 
+    
     furi_hal_subghz_set_frequency(CHAT_FREQ);
     
-    // Самый стабильный метод передачи для uFBT
-    if(furi_hal_subghz_start_async_tx(NULL, NULL)) {
+    // 3. Безопасный захват радио через легальный буфер
+    // Теперь вместо NULL мы передаем dummy_data
+    if(furi_hal_subghz_start_async_tx(dummy_data, sizeof(dummy_data))) {
         furi_delay_ms(150);
         furi_hal_subghz_stop_async_tx();
         
         with_view_model(app->main_view, ChatModel* m, {
-            strncpy(m->last_rx_msg, "Sent OK!", 63);
+            strncpy(m->last_rx_msg, "TX Success!", 63);
         }, true);
     } else {
         with_view_model(app->main_view, ChatModel* m, {
-            strncpy(m->last_rx_msg, "Error: TX Denied", 63);
+            strncpy(m->last_rx_msg, "TX Denied/Busy", 63);
         }, true);
     }
 
     furi_hal_subghz_idle();
     furi_delay_ms(50);
-    
-    // 3. Перезапуск приема
     subghz_worker_start(app->worker);
 }
 
@@ -96,7 +94,6 @@ static bool input_callback(InputEvent* event, void* ctx) {
         } else if(event->key == InputKeyUp || event->key == InputKeyDown) {
             with_view_model(app->main_view, ChatModel * m, {
                 m->is_external = !m->is_external;
-                // Настройка путей антенны напрямую
                 furi_hal_subghz_set_path(m->is_external ? 1 : 0);
             }, true);
             return true;
@@ -141,9 +138,7 @@ int32_t subghz_chat_app(void* p) {
 
     view_dispatcher_run(app->view_dispatcher);
 
-    if(subghz_worker_is_running(app->worker)) {
-        subghz_worker_stop(app->worker);
-    }
+    if(subghz_worker_is_running(app->worker)) subghz_worker_stop(app->worker);
     subghz_worker_free(app->worker);
     furi_hal_subghz_idle();
 
